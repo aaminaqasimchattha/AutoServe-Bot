@@ -2,9 +2,10 @@ import os
 from PIL import Image  # This handles the images
 from sentence_transformers import SentenceTransformer
 from pinecone import Pinecone
-
+from dotenv import load_dotenv
 #SETUP
-pc = Pinecone(api_key="pcsk_3iPvwL_Au4CiqGopggEDi249cjmu39KaUwUAa4529cNBcQwZXEbYTzRean6TmKvjVQkQt1")
+load_dotenv()
+pc = Pinecone(api_key=os.getenv("PINECONE_KEY"))
 index = pc.Index("fashion-bot")
 model = SentenceTransformer('all-MiniLM-L6-v2')
 
