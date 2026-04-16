@@ -4,15 +4,15 @@ from pinecone import Pinecone, ServerlessSpec
 
 # SETUP PINECONE
 # Get API key from the Pinecone dashboard
-pc = Pinecone(api_key="pcsk_3iPvwL_Au4CiqGopggEDi249cjmu39KaUwUAa4529cNBcQwZXEbYTzRean6TmKvjVQkQt1")
+pc = Pinecone(api_key="pcsk_aVQ6i_N7mMoaqtDxXaM2GiRZEMLRUdkqChKWnK2CKexmrBhLR7q5nrFJ4YqrZViR5ay1c")
 
 index_name = "fashion-bot"
 
 # Check if index exists - this must happen BEFORE the loop
 if index_name not in [idx.name for idx in pc.list_indexes()]:
     pc.create_index(
-        name=index_name,
-        dimension=384, 
+        name=multimodal-index,
+        dimension=1536, 
         metric="cosine",
         spec=ServerlessSpec(cloud="aws", region="us-east-1")
     )
