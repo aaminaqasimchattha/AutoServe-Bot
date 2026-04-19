@@ -7,30 +7,6 @@ import hashlib
 import sys
 from pathlib import Path
 from dotenv import load_dotenv
-from sympy import false
-
-# Load chat model dynamically to handle hyphenated directory name
-ai_agent_path = Path(__file__).parent / "ai-agent"
-if str(ai_agent_path) not in sys.path:
-    sys.path.insert(0, str(ai_agent_path))
-
-try:
-    import importlib.util
-    spec = importlib.util.spec_from_file_location("chat_model_module", ai_agent_path / "chat_model.py")
-    if spec and spec.loader:
-        chat_model_module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(chat_model_module)
-        get_chat_response = chat_model_module.get_chat_response
-        initialize_model = chat_model_module.initialize_model
-    else:
-        raise ImportError("Could not load chat model")
-except Exception as e:
-    logging.error(f"Error loading chat model: {e}")
-    # Fallback functions if model fails to load
-    def get_chat_response(msg):
-        return "Model loading failed. Please check logs."
-    def initialize_model():
-        return False
 
 logging.basicConfig(
     level=logging.INFO,
@@ -38,16 +14,34 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Load chat model dynamically from hyphenated folder name: ai-agent
+ai_agent_path = Path(__file__).parent / "ai-agent"
+if str(ai_agent_path) not in sys.path:
+    sys.path.insert(0, str(ai_agent_path))
+
+try:
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("chat_model_module", ai_agent_path / "chat_model.py")
+    if spec and spec.loader:
+        chat_model_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(chat_model_module)
+        get_chat_response = chat_model_module.get_chat_response
+        initialize_model = chat_model_module.initialize_model
+    else:
+        raise ImportError("Could not load chat model module spec")
+except Exception as e:
+    logger.error(f"Model import failed: {e}")
+
+    def get_chat_response(_msg: str) -> str:
+        return "Model loading failed. Please try again later."
+
+    def initialize_model() -> bool:
+        return False
+
 load_dotenv()
 
 app = FastAPI(title="WhatsApp Bot")
-
-# ─── Initialize the chat model on startup ───────────────────────────────────────
-@app.on_event("startup")
-async def startup_event():
-    logger.info("🚀 Starting up WhatsApp Bot...")
-    initialize_model()
-    logger.info("✅ Bot startup complete!")
 
 # ─── CONFIG — matches your .env exactly ───────────────────────────────────────
 ACCESS_TOKEN    = os.getenv("ACCESS_TOKEN")
@@ -66,6 +60,13 @@ else:
     logger.info(f"   PHONE_ID: {PHONE_ID}")
     logger.info(f"   VERIFY_TOKEN: {VERIFY_TOKEN}")
     logger.info(f"   APP_SECRET loaded: {'✓' if APP_SECRET else '✗ NOT SET'}")
+
+
+@app.on_event("startup")
+async def startup_event():
+    logger.info("Starting WhatsApp bot...")
+    initialize_model()
+    logger.info("Startup complete")
 
 
 @app.get("/")
@@ -93,10 +94,11 @@ async def debug():
         "ACCESS_TOKEN_set": bool(ACCESS_TOKEN),
         "PHONE_ID_set": bool(PHONE_ID),
         "VERIFY_TOKEN_set": bool(VERIFY_TOKEN),
-        "webhook_url": "/webhook/whatsappbot/webhook"
+        "webhook_url": "/webhook/whatsapp/webhook"
     }
 
 
+@app.get("/webhook/whatsapp/webhook")
 @app.get("/webhook/Whatsapp/webhook")
 async def verify(
     hub_mode: str = Query(None, alias="hub.mode"),
@@ -117,47 +119,45 @@ async def verify(
     return Response(content="Forbidden", status_code=403)
 
 
+@app.post("/webhook/whatsapp/webhook")
 @app.post("/webhook/Whatsapp/webhook")
 async def webhook(request: Request):
     try:
         headers = dict(request.headers)
         body = await request.body()
 
-        logger.info(f"📥 Webhook received")
+        logger.info(f"📥 Webhook headers: {headers}")
+        logger.info(f"📥 Webhook body raw: {body}")
 
         if not body:
-            logger.info("ℹ️ Empty request body - likely a status update from Meta")
+            logger.warning("⚠️ Empty request body")
             return {"status": "ok"}
-        
-        logger.info(f"📥 Webhook body raw: {body}")
-        logger.info("✅ Webhook received - processing message")
-            
-        # Signature verification disabled for testing
-        # if APP_SECRET:
-        #     signature_header = headers.get("x-hub-signature-256")
-        #     if not signature_header:
-        #         logger.warning("❌ Missing X-Hub-Signature-256 header")
-        #         return Response(content="Missing signature", status_code=403)
-        #
-        #
-        #     if not signature_header.startswith("sha256="):
-        #         logger.warning("❌ Invalid X-Hub-Signature-256 format")
-        #         return Response(content="Invalid signature format", status_code=403)
-        #
-        #     received_signature = signature_header.split("=", 1)[1]
-        #     expected_signature = hmac.new(
-        #         APP_SECRET.encode("utf-8"),
-        #         body,
-        #         hashlib.sha256
-        #     ).hexdigest()
-        #
-        #     if not hmac.compare_digest(received_signature, expected_signature):
-        #         logger.warning("❌ Webhook signature mismatch")
-        #         return Response(content="Invalid signature", status_code=403)
-        #
-        #     logger.info("✅ Webhook signature verified")
-        # else:
-        logger.info("⏭️ Signature verification disabled for testing")
+
+        if APP_SECRET:
+            signature_header = headers.get("x-hub-signature-256")
+            if not signature_header:
+                logger.warning("❌ Missing X-Hub-Signature-256 header")
+                return Response(content="Missing signature", status_code=403)
+
+
+            if not signature_header.startswith("sha256="):
+                logger.warning("❌ Invalid X-Hub-Signature-256 format")
+                return Response(content="Invalid signature format", status_code=403)
+
+            received_signature = signature_header.split("=", 1)[1]
+            expected_signature = hmac.new(
+                APP_SECRET.encode("utf-8"),
+                body,
+                hashlib.sha256
+            ).hexdigest()
+
+            if not hmac.compare_digest(received_signature, expected_signature):
+                logger.warning("❌ Webhook signature mismatch")
+                return Response(content="Invalid signature", status_code=403)
+
+            logger.info("✅ Webhook signature verified")
+        else:
+            logger.warning("⚠️ APP_SECRET not set — skipping signature verification")
 
         data = await request.json()
         logger.info(f"📨 Incoming data: {data}")
@@ -175,16 +175,8 @@ async def webhook(request: Request):
             if message_type == "text":
                 user_text = message.get("text", {}).get("body", "")
                 logger.info(f"💬 Message from {sender_number}: {user_text}")
-                
-                # Send acknowledgment that bot is processing
-                send_whatsapp_message(sender_number, "⏳ Processing your message...")
-                
-                # Generate response using the seq2seq model
-                bot_response = get_chat_response(user_text)
-                logger.info(f"🤖 Bot response: {bot_response}")
-                
-                # Send the actual response
-                send_whatsapp_message(sender_number, bot_response)
+                bot_reply = get_chat_response(user_text)
+                send_whatsapp_message(sender_number, bot_reply)
             else:
                 logger.info(f"📦 Non-text message type: {message_type}")
                 send_whatsapp_message(sender_number, "Sorry, I only support text messages!")
@@ -202,21 +194,21 @@ def send_whatsapp_message(to: str, text: str):
     url = f"https://graph.facebook.com/v25.0/1104882736033016/messages"
     headers = {
         "Authorization": f"Bearer {VERIFY_TOKEN}",
-        "Content-Type": "application/json",
-        "method": "POST"
+        "Content-Type": "application/json"
     }
-    payload ={
-    "messaging_product": "whatsapp",   
-    "recipient_type": "individual",
-    "to": "923095952953",
-    "type": "text",
-    "text": {
-        "preview_url": False,
-        "body": text
+    payload = {
+        "messaging_product": "whatsapp",
+        "recipient_type": "individual",
+        "to": to,
+        "type": "text",
+        "text": {
+            "preview_url": False,
+            "body": text
+        }
     }
-}
+
     try:
-        res = requests.post(url, headers=headers, json=payload, timeout=10, verify=False)
+        res = requests.post(url, headers=headers, json=payload, timeout=10)
         logger.info(f"📤 Reply sent to {to} → Status: {res.status_code}")
         if res.status_code != 200:
             logger.error(f"❌ Failed: {res.text}")
