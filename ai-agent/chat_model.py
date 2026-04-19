@@ -1,215 +1,171 @@
-import os
-import numpy as np
+import csv
 import logging
-from pathlib import Path
-import string
 import pickle
-
-try:
-    import tensorflow as tf
-    from tensorflow import keras
-except ImportError:
-    import keras
+import re
+from pathlib import Path
+from typing import Any
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Path to the model
-MODEL_PATH = os.path.join(os.path.dirname(__file__), "seq2seq_model.keras")
+PRODUCT_DATA_PATH = Path(__file__).resolve().parent / "product_data.pkl"
+SIMILARITY_PATH = Path(__file__).resolve().parent / "similarity_matrix.pkl"
+CSV_FALLBACK_PATH = Path(__file__).resolve().parent.parent / "electronics_product.csv"
 
 class ChatModel:
-    def __init__(self, model_path=MODEL_PATH):
-        """Initialize the chat model"""
-        self.model = None
-        self.model_path = model_path
-        self.max_encoder_seq_length = 20
-        self.max_decoder_seq_length = 20
-        self.vocabulary = None
-        self.reverse_vocabulary = None
-        self.load_model()
-        self._create_vocabulary()
-        
-    def load_model(self):
-        """Load the seq2seq model"""
+    def __init__(self, product_data_path: Path = PRODUCT_DATA_PATH, similarity_path: Path = SIMILARITY_PATH):
+        self.product_data_path = product_data_path
+        self.similarity_path = similarity_path
+        self.products: list[dict[str, Any]] = []
+        self.similarity_matrix: Any = None
+        self.assets_loaded = False
+        self.load_assets()
+
+    def load_assets(self) -> bool:
+        """Load product and similarity artifacts from pickle files."""
         try:
-            if not os.path.exists(self.model_path):
-                logger.error(f"❌ Model not found at {self.model_path}")
-                return False
-                
-            self.model = keras.models.load_model(self.model_path)
-            logger.info(f"✅ Model loaded successfully from {self.model_path}")
-            
-            # Log model info
-            if self.model is not None and hasattr(self.model, 'layers') and isinstance(self.model, keras.Model):
-                logger.info(f"📊 Model has {len(self.model.layers)} layers")
-            
-            # Try to get input/output shapes
-            if self.model is not None and hasattr(self.model, 'input_shape') and isinstance(self.model, keras.Model):
-                try:
-                    logger.info(f"   Input shape: {self.model.input_shape}")
-                except Exception:
-                    pass
-            if self.model is not None and hasattr(self.model, 'output_shape') and isinstance(self.model, keras.Model):
-                try:
-                    logger.info(f"   Output shape: {self.model.output_shape}")
-                except Exception:
-                    pass
-            
-            return True
+            raw_products = self._load_pickle(self.product_data_path)
+            raw_similarity = self._load_pickle(self.similarity_path)
+
+            self.products = self._normalize_products(raw_products)
+            self.similarity_matrix = raw_similarity
+
+            if not self.products and CSV_FALLBACK_PATH.exists():
+                logger.warning("Pickle product data was empty/invalid. Using CSV fallback.")
+                self.products = self._load_products_from_csv(CSV_FALLBACK_PATH)
+
+            self.assets_loaded = bool(self.products)
+            logger.info(
+                "Assets ready: products=%s, similarity=%s",
+                len(self.products),
+                type(self.similarity_matrix).__name__ if self.similarity_matrix is not None else "None",
+            )
+            return self.assets_loaded
         except Exception as e:
-            logger.error(f"❌ Error loading model: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.error(f"Error loading assets: {e}")
+            self.assets_loaded = False
             return False
-    
-    def _create_vocabulary(self):
-        """Create character-level vocabulary"""
-        # Create a simple character vocabulary
-        chars = set(string.ascii_lowercase + string.digits + string.punctuation + ' ')
-        self.vocabulary = {char: idx + 1 for idx, char in enumerate(sorted(chars))}
-        self.vocabulary['<PAD>'] = 0
-        self.reverse_vocabulary = {idx: char for char, idx in self.vocabulary.items()}
-        logger.info(f"✅ Vocabulary created with {len(self.vocabulary)} characters")
-    
-    def preprocess_input(self, text):
-        """
-        Preprocess the input text for the model
-        """
-        try:
-            # Convert to lowercase
-            text = text.lower().strip()
-            
-            # Remove extra whitespace
-            text = ' '.join(text.split())
-            
-            # Keep only characters that are in our vocabulary
-            text = ''.join([char if char in self.vocabulary else ' ' for char in text])
-            
-            # Pad/truncate to expected length
-            if len(text) > self.max_encoder_seq_length:
-                text = text[:self.max_encoder_seq_length]
-            
-            logger.info(f"📝 Processed input: {text}")
-            return text
-        except Exception as e:
-            logger.error(f"Error preprocessing input: {e}")
-            return text
-    
-    def _text_to_sequence(self, text):
-        """Convert text to sequence of integers"""
-        try:
-            sequence = [self.vocabulary.get(char, 0) for char in text]
-            # Pad sequence
-            if len(sequence) < self.max_encoder_seq_length:
-                sequence = sequence + [0] * (self.max_encoder_seq_length - len(sequence))
-            return sequence[:self.max_encoder_seq_length]
-        except Exception as e:
-            logger.error(f"Error converting text to sequence: {e}")
-            return [0] * self.max_encoder_seq_length
-    
-    def _sequence_to_text(self, sequence):
-        """Convert sequence of integers back to text"""
-        try:
-            text = ''
-            for idx in sequence:
-                if idx == 0:  # PAD token
-                    continue
-                char = self.reverse_vocabulary.get(idx, '')
-                if char and char != '<PAD>':
-                    text += char
-            return text.strip()
-        except Exception as e:
-            logger.error(f"Error converting sequence to text: {e}")
-            return "Error decoding response"
-    
-    def generate_response(self, user_input):
-        """
-        Generate a response from the seq2seq model based on user input.
-        """
-        try:
-            if self.model is None:
-                logger.error("Model not loaded")
-                return "I'm sorry, the model is not available. Please try again later."
-            
-            logger.info(f"🤖 Generating response for: '{user_input}'")
-            
-            # Preprocess the input
-            processed_input = self.preprocess_input(user_input)
-            
-            # Convert text to sequence
-            input_sequence = self._text_to_sequence(processed_input)
-            logger.info(f"📊 Input sequence length: {len(input_sequence)}")
-            
-            # Prepare input for the model
+
+    def _load_pickle(self, path: Path) -> Any:
+        if not path.exists():
+            logger.warning("Pickle file missing: %s", path)
+            return None
+        with path.open("rb") as f:
+            return pickle.load(f)
+
+    def _safe_text(self, value: Any) -> str:
+        """Return ASCII-safe text for terminals/environments with limited encoding."""
+        text = str(value or "")
+        text = text.replace("\u20b9", "Rs ")
+        return text.encode("ascii", "ignore").decode("ascii")
+
+    def _normalize_products(self, obj: Any) -> list[dict[str, Any]]:
+        """Normalize supported product-data formats into list-of-dicts."""
+        if obj is None:
+            return []
+
+        if hasattr(obj, "to_dict"):
             try:
-                # Create batch (add batch dimension)
-                input_batch = np.array([input_sequence])
-                logger.info(f"📥 Input shape for model: {input_batch.shape}")
-                
-                # Make prediction
-                prediction = self.model.predict(input_batch, verbose=0)
-                logger.info(f"📤 Prediction shape: {prediction.shape}")
-                
-                # Process the output - convert to readable text
-                response = self._decode_prediction(prediction)
-                
-                logger.info(f"✅ Generated response: {response}")
-                return response if response.strip() else "I'm processing your request. Could you please rephrase?"
-                
-            except Exception as e:
-                logger.warning(f"⚠️ Prediction error: {e}")
-                import traceback
-                traceback.print_exc()
-                return f"I understand you asked about: '{user_input}'. Let me help you with that."
-        
+                return obj.to_dict(orient="records")
+            except TypeError:
+                pass
+
+        if isinstance(obj, list):
+            return [item for item in obj if isinstance(item, dict)]
+
+        if isinstance(obj, dict):
+            if "products" in obj and isinstance(obj["products"], list):
+                return [item for item in obj["products"] if isinstance(item, dict)]
+            return []
+
+        return []
+
+    def _load_products_from_csv(self, csv_path: Path) -> list[dict[str, Any]]:
+        products: list[dict[str, Any]] = []
+        with csv_path.open("r", encoding="utf-8", newline="") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                products.append(row)
+        return products
+
+    def _tokenize(self, text: str) -> list[str]:
+        return re.findall(r"[a-z0-9]+", (text or "").lower())
+
+    def _product_text(self, product: dict[str, Any]) -> str:
+        name = str(product.get("name", ""))
+        main_category = str(product.get("main_category", ""))
+        sub_category = str(product.get("sub_category", ""))
+        return f"{name} {main_category} {sub_category}".lower()
+
+    def _match_products(self, user_input: str) -> list[int]:
+        tokens = self._tokenize(user_input)
+        if not tokens:
+            return []
+
+        scored: list[tuple[int, int]] = []
+        for idx, product in enumerate(self.products):
+            product_blob = self._product_text(product)
+            score = sum(1 for token in tokens if token in product_blob)
+            if score > 0:
+                scored.append((score, idx))
+
+        scored.sort(reverse=True)
+        return [idx for _, idx in scored[:5]]
+
+    def _similar_indices(self, anchor_idx: int, limit: int = 3) -> list[int]:
+        """Return nearest indices from similarity matrix if it looks valid."""
+        matrix = self.similarity_matrix
+        if matrix is None:
+            return []
+
+        try:
+            row = matrix[anchor_idx]
+            indexed = [(float(score), i) for i, score in enumerate(row) if i != anchor_idx]
+            indexed.sort(reverse=True)
+            return [i for _, i in indexed[:limit]]
+        except Exception:
+            return []
+
+    def _format_reply(self, indices: list[int]) -> str:
+        lines = ["Here are some products you may like:"]
+        for i, idx in enumerate(indices, start=1):
+            if idx < 0 or idx >= len(self.products):
+                continue
+            product = self.products[idx]
+            name = self._safe_text(product.get("name", "Unknown Product"))
+            price = self._safe_text(product.get("discount_price", "N/A"))
+            category = self._safe_text(product.get("sub_category", "Electronics"))
+            lines.append(f"{i}. {name} | Price: {price} | Category: {category}")
+
+        if len(lines) == 1:
+            return "I could not find matching products right now. Please try another keyword."
+        return "\n".join(lines)
+
+    def generate_response(self, user_input: str) -> str:
+        """Generate a recommendation reply using pickle-loaded artifacts."""
+        try:
+            if not self.assets_loaded:
+                return "Recommendation model is not ready. Please load valid product .pkl files."
+
+            matches = self._match_products(user_input)
+            if not matches:
+                return "I could not find a match. Try keywords like phone, earbuds, charger, or smartwatch."
+
+            anchor = matches[0]
+            similar = self._similar_indices(anchor, limit=3)
+            candidate_indices = [anchor] + [idx for idx in similar if idx not in matches[:1]]
+
+            if len(candidate_indices) < 3:
+                for idx in matches[1:]:
+                    if idx not in candidate_indices:
+                        candidate_indices.append(idx)
+                    if len(candidate_indices) >= 3:
+                        break
+
+            return self._format_reply(candidate_indices[:3])
         except Exception as e:
             logger.error(f"Error generating response: {e}")
-            import traceback
-            traceback.print_exc()
-            return "Sorry, I encountered an error processing your message."
-    
-    def _decode_prediction(self, prediction):
-        """
-        Decode the model's prediction output into readable text.
-        Handles various output formats from seq2seq models.
-        """
-        try:
-            if isinstance(prediction, np.ndarray):
-                logger.info(f"Prediction type: {type(prediction)}, dtype: {prediction.dtype}, shape: {prediction.shape}")
-                
-                # Remove batch dimension if present
-                if prediction.ndim > 1 and prediction.shape[0] == 1:
-                    prediction = prediction[0]
-                
-                # If it's 2D (sequence_length, vocab_size) - probabilities
-                if prediction.ndim == 2:
-                    # Apply argmax to get most likely token at each position
-                    predicted_ids = np.argmax(prediction, axis=-1)
-                    logger.info(f"Predicted IDs: {predicted_ids}")
-                    response = self._sequence_to_text(predicted_ids)
-                    return response
-                
-                # If it's 1D - could be token IDs or confidence scores
-                elif prediction.ndim == 1:
-                    if prediction.max() > 1 or prediction.dtype in [np.int32, np.int64]:
-                        # Looks like token IDs
-                        response = self._sequence_to_text(prediction)
-                    else:
-                        # Looks like probabilities - not expected for output
-                        predicted_ids = np.argmax(prediction)
-                        response = self._sequence_to_text([predicted_ids])
-                    return response
-                
-                else:
-                    logger.warning(f"Unexpected prediction shape: {prediction.shape}")
-                    return "I'm processing your message..."
-            
-            return str(prediction)
-        except Exception as e:
-            logger.error(f"Error decoding prediction: {e}")
-            import traceback
-            traceback.print_exc()
-            return "I'm having trouble understanding. Could you rephrase?"
+            return "Sorry, I hit an error while generating recommendations."
 
 
 
@@ -217,14 +173,14 @@ class ChatModel:
 chat_model = None
 
 def initialize_model():
-    """Initialize the chat model on startup"""
+    """Initialize pickle-backed recommendation model on startup."""
     global chat_model
     try:
         chat_model = ChatModel()
-        logger.info("✅ Chat model initialized successfully")
+        logger.info("Chat model initialized successfully")
         return True
     except Exception as e:
-        logger.error(f"❌ Failed to initialize chat model: {e}")
+        logger.error(f"Failed to initialize chat model: {e}")
         return False
 
 def get_chat_response(user_message):
