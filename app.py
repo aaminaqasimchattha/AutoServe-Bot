@@ -7,6 +7,7 @@ import hashlib
 import sys
 from pathlib import Path
 from dotenv import load_dotenv
+from sympy import false
 
 # Load chat model dynamically to handle hyphenated directory name
 ai_agent_path = Path(__file__).parent / "ai-agent"
@@ -96,7 +97,7 @@ async def debug():
     }
 
 
-@app.get("/webhook/Whatsappbot/webhook")
+@app.get("/webhook/Whatsapp/webhook")
 async def verify(
     hub_mode: str = Query(None, alias="hub.mode"),
     hub_verify_token: str = Query(None, alias="hub.verify_token"),
@@ -116,7 +117,7 @@ async def verify(
     return Response(content="Forbidden", status_code=403)
 
 
-@app.post("/webhook/Whatsappbot/webhook")
+@app.post("/webhook/Whatsapp/webhook")
 async def webhook(request: Request):
     try:
         headers = dict(request.headers)
@@ -131,31 +132,32 @@ async def webhook(request: Request):
         logger.info(f"📥 Webhook body raw: {body}")
         logger.info("✅ Webhook received - processing message")
             
-        if APP_SECRET:
-            signature_header = headers.get("x-hub-signature-256")
-            if not signature_header:
-                logger.warning("❌ Missing X-Hub-Signature-256 header")
-                return Response(content="Missing signature", status_code=403)
-
-
-            if not signature_header.startswith("sha256="):
-                logger.warning("❌ Invalid X-Hub-Signature-256 format")
-                return Response(content="Invalid signature format", status_code=403)
-
-            received_signature = signature_header.split("=", 1)[1]
-            expected_signature = hmac.new(
-                APP_SECRET.encode("utf-8"),
-                body,
-                hashlib.sha256
-            ).hexdigest()
-
-            if not hmac.compare_digest(received_signature, expected_signature):
-                logger.warning("❌ Webhook signature mismatch")
-                return Response(content="Invalid signature", status_code=403)
-
-            logger.info("✅ Webhook signature verified")
-        else:
-            logger.warning("⚠️ APP_SECRET not set — skipping signature verification")
+        # Signature verification disabled for testing
+        # if APP_SECRET:
+        #     signature_header = headers.get("x-hub-signature-256")
+        #     if not signature_header:
+        #         logger.warning("❌ Missing X-Hub-Signature-256 header")
+        #         return Response(content="Missing signature", status_code=403)
+        #
+        #
+        #     if not signature_header.startswith("sha256="):
+        #         logger.warning("❌ Invalid X-Hub-Signature-256 format")
+        #         return Response(content="Invalid signature format", status_code=403)
+        #
+        #     received_signature = signature_header.split("=", 1)[1]
+        #     expected_signature = hmac.new(
+        #         APP_SECRET.encode("utf-8"),
+        #         body,
+        #         hashlib.sha256
+        #     ).hexdigest()
+        #
+        #     if not hmac.compare_digest(received_signature, expected_signature):
+        #         logger.warning("❌ Webhook signature mismatch")
+        #         return Response(content="Invalid signature", status_code=403)
+        #
+        #     logger.info("✅ Webhook signature verified")
+        # else:
+        logger.info("⏭️ Signature verification disabled for testing")
 
         data = await request.json()
         logger.info(f"📨 Incoming data: {data}")
@@ -203,17 +205,16 @@ def send_whatsapp_message(to: str, text: str):
         "Content-Type": "application/json",
         "method": "POST"
     }
-    payload = {
-        "messaging_product": "whatsapp",   
-        "recipient_type": "individual",
-        "to": to,
-        "type": "text",
-        "text": {
-            "preview_url": False,
-            "body": text
-        }
+    payload ={
+    "messaging_product": "whatsapp",   
+    "recipient_type": "individual",
+    "to": "923095952953",
+    "type": "text",
+    "text": {
+        "preview_url": False,
+        "body": text
     }
-
+}
     try:
         res = requests.post(url, headers=headers, json=payload, timeout=10, verify=False)
         logger.info(f"📤 Reply sent to {to} → Status: {res.status_code}")
