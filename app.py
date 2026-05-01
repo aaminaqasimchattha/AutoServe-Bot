@@ -98,7 +98,7 @@ async def debug():
     }
 
 
-@app.get("/webhook/whatsapp/webhook")
+@app.get("/webhook/Whatsapp/webhook")
 @app.get("/webhook/Whatsapp/webhook")
 async def verify(
     hub_mode: str = Query(None, alias="hub.mode"),
@@ -119,9 +119,13 @@ async def verify(
     return Response(content="Forbidden", status_code=403)
 
 
-@app.post("/webhook/whatsapp/webhook")
+processed_message_ids = set()
+
+
+@app.post("/webhook/Whatsapp/webhook")
 @app.post("/webhook/Whatsapp/webhook")
 async def webhook(request: Request):
+    global processed_message_ids
     try:
         headers = dict(request.headers)
         body = await request.body()
@@ -160,22 +164,45 @@ async def webhook(request: Request):
             logger.warning("⚠️ APP_SECRET not set — skipping signature verification")
 
         data = await request.json()
-        logger.info(f"📨 Incoming data: {data}")
-
+        
         entry = data.get("entry", [{}])[0]
         changes = entry.get("changes", [{}])[0]
         value = changes.get("value", {})
+
+        # Ignore statuses completely
+        if "statuses" in value:
+            return {"status": "ok"}
+
         messages = value.get("messages", [])
+
 
         if messages:
             message = messages[0]
+            message_id = message.get("id")
+
+            if message_id and message_id in processed_message_ids:
+                logger.info(f"🔄 Duplicate message {message_id} received, skipping.")
+                return {"status": "ok"}
+            
+            if message_id:
+                processed_message_ids.add(message_id)
+
             sender_number = message.get("from")
             message_type = message.get("type")
 
+
             if message_type == "text":
                 user_text = message.get("text", {}).get("body", "")
-                logger.info(f"💬 Message from {sender_number}: {user_text}")
-                bot_reply = get_chat_response(user_text)
+                print(f"\n=======================================================")
+                print(f"💬 User {sender_number} says: {user_text}")
+                logger.info(f"💬 User {sender_number} says: {user_text}")
+                
+                bot_reply = get_chat_response(sender_number, user_text)
+                
+                print(f"🤖 Zara replies: {bot_reply}")
+                print(f"=======================================================\n")
+                logger.info(f"🤖 Zara replies: {bot_reply}")
+                
                 send_whatsapp_message(sender_number, bot_reply)
             else:
                 logger.info(f"📦 Non-text message type: {message_type}")
@@ -206,6 +233,7 @@ def send_whatsapp_message(to: str, text: str):
             "body": text
         }
     }
+
 
     try:
         res = requests.post(url, headers=headers, json=payload, timeout=10)
