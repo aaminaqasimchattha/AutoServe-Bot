@@ -12,18 +12,18 @@ import {
 
 export function Sidebar() {
   return (
-    <aside className="w-64 bg-[hsl(var(--sidebar))] border-r border-[hsl(var(--border))] h-screen flex flex-col">
+    <aside className="w-64 bg-sidebar border-r border-border h-screen flex flex-col">
       {/* Logo Section */}
-      <div className="p-6 border-b border-[hsl(var(--border))]">
+      <div className="p-6 border-b border-border">
         <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-[hsl(var(--primary))] to-[hsl(var(--accent))] flex items-center justify-center shadow-lg shadow-[hsl(var(--primary)/0.3)]">
+          <div className="w-10 h-10 rounded-xl bg-linear-to-br from-primary to-accent flex items-center justify-center shadow-lg shadow-primary/30">
             <Bot className="text-white" size={22} />
           </div>
           <div>
             <h1 className="text-lg font-bold text-foreground tracking-tight">
               AutoServe
             </h1>
-            <p className="text-xs text-[hsl(var(--primary))] font-medium">
+            <p className="text-xs text-primary font-medium">
               AI Knowledge Hub
             </p>
           </div>
@@ -56,9 +56,9 @@ export function Sidebar() {
       </nav>
 
       {/* User Section */}
-      <div className="p-4 border-t border-[hsl(var(--border))] space-y-3">
+      <div className="p-4 border-t border-border space-y-3">
         <div className="flex items-center gap-3 px-3">
-          <div className="w-10 h-10 rounded-full bg-gradient-to-br from-[hsl(var(--accent))] to-[hsl(var(--primary))] flex items-center justify-center flex-shrink-0 shadow-md">
+          <div className="w-10 h-10 rounded-full bg-linear-to-br from-accent to-primary flex items-center justify-center shrink-0 shadow-md">
             <span className="text-white font-semibold text-sm">AQ</span>
           </div>
           <div className="flex-1 min-w-0">
@@ -70,7 +70,7 @@ export function Sidebar() {
             </p>
           </div>
         </div>
-        <button className="w-full flex items-center gap-2 px-3 py-2 text-sm text-muted-foreground hover:text-foreground hover:bg-[hsl(var(--secondary))] rounded-lg transition-all duration-200">
+        <button className="w-full flex items-center gap-2 px-3 py-2 text-sm text-muted-foreground hover:text-foreground hover:bg-secondary rounded-lg transition-all duration-200">
           <LogOut size={18} />
           Logout
         </button>
@@ -92,8 +92,8 @@ function NavItem({ href, icon, label, active }: NavItemProps) {
       href={href}
       className={`flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all duration-200 ${
         active
-          ? 'bg-gradient-to-r from-[hsl(var(--primary))] to-[hsl(var(--primary-hover))] text-white shadow-lg shadow-[hsl(var(--primary)/0.3)]'
-          : 'text-muted-foreground hover:text-foreground hover:bg-[hsl(var(--secondary))]'
+          ? 'bg-linear-to-br from-primary to-primary-hover text-white shadow-lg shadow-primary/30'
+          : 'text-muted-foreground hover:text-foreground hover:bg-secondary'
       }`}
     >
       {icon}

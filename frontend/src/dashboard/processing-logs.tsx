@@ -17,79 +17,28 @@ interface Log {
 export function ProcessingLogs() {
   const [currentPage, setCurrentPage] = useState(1);
 
-  const logs: Log[] = [
-    {
-      id: '1',
-      fileName: 'electronics_2024.csv',
-      type: 'file',
-      size: '2.4 MB',
-      status: 'completed',
-      chunks: 48,
-      duration: '2.3s',
-      timestamp: '2024-01-15 10:23',
-    },
-    {
-      id: '2',
-      fileName: 'gadgets_q4.xlsx',
-      type: 'file',
-      size: '1.8 MB',
-      status: 'completed',
-      chunks: 36,
-      duration: '1.9s',
-      timestamp: '2024-01-15 10:15',
-    },
-    {
-      id: '3',
-      fileName: 'docs.autoserve.bot',
-      type: 'url',
-      size: '3.2 MB',
-      status: 'processing',
-      chunks: 64,
-      duration: '1.2s',
-      timestamp: '2024-01-15 10:05',
-    },
-    {
-      id: '4',
-      fileName: 'products_batch.json',
-      type: 'file',
-      size: '890 KB',
-      status: 'completed',
-      chunks: 18,
-      duration: '0.8s',
-      timestamp: '2024-01-15 09:45',
-    },
-    {
-      id: '5',
-      fileName: 'archive_backup.zip',
-      type: 'file',
-      size: '5.1 MB',
-      status: 'error',
-      chunks: 0,
-      duration: 'Failed',
-      timestamp: '2024-01-15 09:30',
-    },
-  ];
+  const logs: Log[] = [];
 
   const statusConfig = {
     completed: {
       icon: CheckCircle,
-      color: 'text-[hsl(var(--success))]',
+      color: 'text-success',
       badge:
-        'bg-[hsl(var(--success)/0.1)] text-[hsl(var(--success))] border border-[hsl(var(--success)/0.2)]',
+        'bg-success/10 text-success border border-success/20',
       label: 'Done',
     },
     processing: {
       icon: Clock,
-      color: 'text-[hsl(var(--warning))]',
+      color: 'text-warning',
       badge:
-        'bg-[hsl(var(--warning)/0.1)] text-[hsl(var(--warning))] border border-[hsl(var(--warning)/0.2)]',
+        'bg-warning/10 text-warning border border-warning/20',
       label: 'Processing',
     },
     error: {
       icon: AlertCircle,
-      color: 'text-[hsl(var(--danger))]',
+      color: 'text-danger',
       badge:
-        'bg-[hsl(var(--danger)/0.1)] text-[hsl(var(--danger))] border border-[hsl(var(--danger)/0.2)]',
+        'bg-danger/10 text-danger border border-danger/20',
       label: 'Error',
     },
   };
@@ -102,7 +51,7 @@ export function ProcessingLogs() {
   return (
     <div className="glass-card rounded-xl overflow-hidden">
       {/* Table Header */}
-      <div className="p-6 border-b border-[hsl(var(--border))]">
+      <div className="p-6 border-b border-border">
         <h2 className="text-lg font-semibold text-foreground tracking-tight">
           Processing Logs
         </h2>
@@ -112,7 +61,7 @@ export function ProcessingLogs() {
       <div className="overflow-x-auto">
         <table className="w-full">
           <thead>
-            <tr className="border-b border-[hsl(var(--border)/0.5)] bg-[hsl(var(--secondary)/0.3)]">
+            <tr className="border-b border-border/50 bg-secondary/30">
               <th className="px-6 py-3 text-left text-xs font-semibold text-muted-foreground uppercase tracking-wider">
                 File Name
               </th>
@@ -140,13 +89,13 @@ export function ProcessingLogs() {
               return (
                 <tr
                   key={log.id}
-                  className="border-b border-[hsl(var(--border)/0.3)] hover:bg-[hsl(var(--secondary)/0.3)] transition-colors duration-150"
+                  className="border-b border-border/30 hover:bg-secondary/30 transition-colors duration-150"
                 >
                   <td className="px-6 py-4 text-sm text-foreground font-medium">
                     {log.fileName}
                   </td>
                   <td className="px-6 py-4">
-                    <span className="text-xs px-2 py-1 rounded-full bg-[hsl(var(--secondary))] text-muted-foreground capitalize font-medium">
+                    <span className="text-xs px-2 py-1 rounded-full bg-secondary text-muted-foreground capitalize font-medium">
                       {log.type}
                     </span>
                   </td>
@@ -177,7 +126,7 @@ export function ProcessingLogs() {
       </div>
 
       {/* Pagination */}
-      <div className="px-6 py-4 border-t border-[hsl(var(--border)/0.5)] flex items-center justify-between bg-[hsl(var(--secondary)/0.2)]">
+      <div className="px-6 py-4 border-t border-border/50 flex items-center justify-between bg-secondary/20">
         <p className="text-sm text-muted-foreground">
           Showing {startIdx + 1} to{' '}
           {Math.min(startIdx + itemsPerPage, logs.length)} of {logs.length}
@@ -186,7 +135,7 @@ export function ProcessingLogs() {
           <button
             onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
             disabled={currentPage === 1}
-            className="px-3 py-1.5 text-sm bg-[hsl(var(--secondary))] text-foreground rounded-lg hover:bg-[hsl(var(--card-hover))] disabled:opacity-40 disabled:cursor-not-allowed transition-all duration-200"
+            className="px-3 py-1.5 text-sm bg-secondary text-foreground rounded-lg hover:bg-card-hover disabled:opacity-40 disabled:cursor-not-allowed transition-all duration-200"
           >
             Previous
           </button>
@@ -196,8 +145,8 @@ export function ProcessingLogs() {
               onClick={() => setCurrentPage(page)}
               className={`px-3 py-1.5 text-sm rounded-lg transition-all duration-200 ${
                 page === currentPage
-                  ? 'bg-gradient-to-r from-[hsl(var(--primary))] to-[hsl(var(--accent))] text-white shadow-md'
-                  : 'bg-[hsl(var(--secondary))] text-foreground hover:bg-[hsl(var(--card-hover))]'
+                  ? 'bg-linear-to-br from-primary to-accent text-white shadow-md'
+                  : 'bg-secondary text-foreground hover:bg-card-hover'
               }`}
             >
               {page}
@@ -208,7 +157,7 @@ export function ProcessingLogs() {
               setCurrentPage((p) => Math.min(totalPages, p + 1))
             }
             disabled={currentPage === totalPages}
-            className="px-3 py-1.5 text-sm bg-[hsl(var(--secondary))] text-foreground rounded-lg hover:bg-[hsl(var(--card-hover))] disabled:opacity-40 disabled:cursor-not-allowed transition-all duration-200"
+            className="px-3 py-1.5 text-sm bg-secondary text-foreground rounded-lg hover:bg-card-hover disabled:opacity-40 disabled:cursor-not-allowed transition-all duration-200"
           >
             Next
           </button>

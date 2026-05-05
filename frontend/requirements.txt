@@ -43,11 +43,8 @@ openpyxl==3.1.5
 orjson==3.11.8
 packaging==26.1
 pandas==3.0.2
-pillow==12.2.0
 pinecone==8.1.2
-pinecone-client==5.0.1
 pinecone-plugin-assistant==3.0.3
-pinecone-plugin-inference==1.1.0
 pinecone-plugin-interface==0.0.7
 proto-plus==1.27.2
 protobuf==5.29.6
@@ -59,7 +56,6 @@ pydantic==2.13.3
 pydantic-core==2.46.3
 pygments==2.20.0
 pyparsing==3.3.2
-pytesseract==0.3.13
 python-dateutil==2.9.0.post0
 python-dotenv==1.2.2
 python-multipart==0.0.27

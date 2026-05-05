@@ -16,7 +16,7 @@ export function DataIngestion() {
         <h2 className="text-lg font-semibold text-foreground mb-4 tracking-tight">
           Ingest Data
         </h2>
-        <div className="flex gap-1 bg-[hsl(var(--secondary))] rounded-xl p-1 w-fit">
+        <div className="flex gap-1 bg-secondary rounded-xl p-1 w-fit">
           <TabButton
             active={activeTab === 'files'}
             onClick={() => setActiveTab('files')}
@@ -54,8 +54,8 @@ function TabButton({ active, onClick, icon, label }: TabButtonProps) {
       onClick={onClick}
       className={`flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition-all duration-200 ${
         active
-          ? 'bg-gradient-to-r from-[hsl(var(--primary))] to-[hsl(var(--primary-hover))] text-white shadow-md shadow-[hsl(var(--primary)/0.3)]'
-          : 'text-muted-foreground hover:text-foreground hover:bg-[hsl(var(--card))]'
+          ? 'bg-linear-to-br from-primary to-primary-hover text-white shadow-md shadow-primary/30'
+          : 'text-muted-foreground hover:text-foreground hover:bg-card'
       }`}
     >
       {icon}

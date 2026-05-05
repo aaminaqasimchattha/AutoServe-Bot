@@ -58,6 +58,25 @@ def place_order(product_name: str, quantity: int, customer_address: str) -> str:
         "quantity": quantity,
         "address":  customer_address,
     }
+
+    # Try to persist order to frontend API if available
+    try:
+        import requests
+        frontend_api = _get_env_value("FRONTEND_API_URL", "FRONTEND_URL") or "http://localhost:3000"
+        url = f"{frontend_api.rstrip('/')}/api/orders"
+        payload = {
+            "order_id": order_id,
+            "product": product_name,
+            "quantity": quantity,
+            "address": customer_address,
+            "status": "Processing",
+        }
+        resp = requests.post(url, json=payload, timeout=5)
+        if resp.ok:
+            logger.info("Order persisted to frontend: %s", order_id)
+    except Exception as e:
+        logger.warning("Could not persist order to frontend API: %s", e)
+
     return f"SUCCESS: Order placed. Order ID is {order_id}."
 
 
@@ -695,12 +714,7 @@ class GeminiChatModel:
     def _quota_fallback_response(self, user_input: str) -> str:
         """Graceful fallback when Gemini quota is exhausted."""
         search_reply = self._direct_product_response(user_input)
-        return (
-            "⚠️ Gemini quota reached right now.\n\n"
-            "I switched to local product search so I can still help you browse items:\n\n"
-            f"{search_reply}\n\n"
-            "For full AI chat features, wait for quota reset or use a higher-quota model/key."
-        )
+        return search_reply
 
     def _build_catalog_page(self, sender: str, reset: bool) -> str:
         """Page through self.all_products — fully loaded from Pinecone or CSV."""
@@ -807,7 +821,8 @@ You are Zara, a helpful electronics shopping assistant.
 
 ━━━ PRODUCT LISTING RULES ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 When a PRODUCT DATABASE is included in the prompt:
-
+Whenever user say  1 itshould reply wittheme message  below
+Hi there, I'm Zara, the AI Assistant. How can I help you? 
 1. List EVERY single product — never skip, summarise, or say "and more".
 2. For each product show ALL of these fields as a numbered card:
    • Full product name

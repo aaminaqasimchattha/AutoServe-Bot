@@ -14,6 +14,7 @@ export function UrlUpload() {
   const [urls, setUrls] = useState<UploadedUrl[]>([]);
   const [input, setInput] = useState('');
   const [error, setError] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   const isValidUrl = (string: string) => {
     try {
@@ -24,7 +25,7 @@ export function UrlUpload() {
     }
   };
 
-  const handleAdd = () => {
+  const handleAdd = async () => {
     if (!input.trim()) {
       setError('Please enter a URL');
       return;
@@ -46,6 +47,42 @@ export function UrlUpload() {
     setUrls((prev) => [...prev, newUrl]);
     setInput('');
     setError('');
+
+    setIsSubmitting(true);
+    try {
+      const response = await fetch('/api/upload-urls', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ url: newUrl.url, domain: newUrl.domain }),
+      });
+
+      if (response.ok) {
+        setUrls((prev) =>
+          prev.map((u) =>
+            u.id === newUrl.id ? { ...u, status: 'completed' } : u
+          )
+        );
+      } else {
+        const errorBody = await response.json().catch(() => ({}));
+        setUrls((prev) =>
+          prev.map((u) =>
+            u.id === newUrl.id
+              ? { ...u, status: 'error' }
+              : u
+          )
+        );
+        setError(errorBody.message || `URL upload failed (${response.status})`);
+      }
+    } catch (err) {
+      setUrls((prev) =>
+        prev.map((u) =>
+          u.id === newUrl.id ? { ...u, status: 'error' } : u
+        )
+      );
+      setError(err instanceof Error ? err.message : 'Failed to submit URL');
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   const removeUrl = (id: string) => {
@@ -82,11 +119,12 @@ export function UrlUpload() {
           </div>
           <button
             onClick={handleAdd}
-            className="px-5 py-2.5 bg-primary text-white rounded-xl hover:bg-primary-hover transition-all duration-200 flex items-center gap-2 font-medium shadow-lg shadow-primary/25 active:scale-[0.97]"
+            disabled={isSubmitting}
+            className="px-5 py-2.5 bg-primary text-white rounded-xl hover:bg-primary-hover transition-all duration-200 flex items-center gap-2 font-medium shadow-lg shadow-primary/25 active:scale-97"
             id="add-url-button"
           >
             <Plus size={18} />
-            Add
+            {isSubmitting ? 'Adding...' : 'Add'}
           </button>
         </div>
         {error && (

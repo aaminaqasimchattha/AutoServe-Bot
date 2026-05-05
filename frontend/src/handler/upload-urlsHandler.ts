@@ -1,13 +1,21 @@
-const DEFAULT_BACKEND_URL = 'https://jone-fumiest-unabsorbingly.ngrok-free.dev';
-
 function getBackendUrl(): string {
-  return process.env.BACKEND_API_URL || process.env.NEXT_PUBLIC_API_URL || DEFAULT_BACKEND_URL;
+  return (
+    process.env.NEXT_PUBLIC_BACKEND_URL ||
+    process.env.BACKEND_API_URL ||
+    process.env.NEXT_PUBLIC_API_URL ||
+    ''
+  );
 }
 
 export async function uploadUrlsHandler(request: Request) {
   try {
     const body = await request.text();
-    const backendUrl = `${getBackendUrl()}/api/upload-urls`;
+    const backendBaseUrl = getBackendUrl();
+    if (!backendBaseUrl) {
+      throw new Error('Missing backend URL. Set NEXT_PUBLIC_BACKEND_URL or BACKEND_API_URL to your active ngrok URL.');
+    }
+
+    const backendUrl = `${backendBaseUrl}/api/upload-urls`;
 
     const response = await fetch(backendUrl, {
       method: 'POST',

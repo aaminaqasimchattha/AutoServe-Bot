@@ -11,43 +11,7 @@ interface ActivityItem {
 }
 
 export function Activity() {
-  const activities: ActivityItem[] = [
-    {
-      id: '1',
-      type: 'upload',
-      title: 'Uploaded Product Data',
-      description: 'electronics_2024.csv (2.4 MB)',
-      timestamp: '2 min ago',
-    },
-    {
-      id: '2',
-      type: 'url',
-      title: 'Added URL Index',
-      description: 'https://docs.autoserve.bot',
-      timestamp: '15 min ago',
-    },
-    {
-      id: '3',
-      type: 'chat',
-      title: 'Chat Session Started',
-      description: 'User session #4521 initialized',
-      timestamp: '32 min ago',
-    },
-    {
-      id: '4',
-      type: 'setting',
-      title: 'Settings Updated',
-      description: 'Embedding model: all-MiniLM-L6-v2',
-      timestamp: '1 hr ago',
-    },
-    {
-      id: '5',
-      type: 'upload',
-      title: 'Batch Upload Completed',
-      description: '5 files processed successfully',
-      timestamp: '2 hrs ago',
-    },
-  ];
+  const activities: ActivityItem[] = [];
 
   const typeConfig = {
     upload: {
@@ -85,10 +49,10 @@ export function Activity() {
           return (
             <div
               key={activity.id}
-              className="flex gap-3 p-2.5 rounded-xl hover:bg-[hsl(var(--secondary)/0.5)] transition-all duration-200 group cursor-default"
+              className="flex gap-3 p-2.5 rounded-xl hover:bg-secondary/50 transition-all duration-200 group cursor-default"
             >
               <div
-                className={`p-2 rounded-lg h-fit bg-gradient-to-br ${config.gradient} shadow-sm group-hover:scale-110 transition-transform duration-200`}
+                className={`p-2 rounded-lg h-fit bg-linear-to-br ${config.gradient} shadow-sm group-hover:scale-110 transition-transform duration-200`}
               >
                 <Icon size={14} className={config.iconColor} />
               </div>
@@ -100,7 +64,7 @@ export function Activity() {
                   {activity.description}
                 </p>
               </div>
-              <p className="text-xs text-muted-foreground flex-shrink-0 mt-0.5">
+              <p className="text-xs text-muted-foreground shrink-0 mt-0.5">
                 {activity.timestamp}
               </p>
             </div>

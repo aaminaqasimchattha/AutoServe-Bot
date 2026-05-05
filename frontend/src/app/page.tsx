@@ -19,7 +19,7 @@ export default function DashboardPage() {
 
         {/* Content Area */}
         <main className="flex-1 overflow-y-auto">
-          <div className="p-8 space-y-8 max-w-[1600px] mx-auto">
+          <div className="p-8 space-y-8 max-w-1600px mx-auto">
             {/* Welcome Section */}
             <div className="animate-fade-in-up">
               <h1 className="text-4xl font-bold text-foreground mb-2 tracking-tight">
@@ -56,7 +56,7 @@ export default function DashboardPage() {
                 style={{ animationDelay: '0.3s' }}
               >
                 {/* Chat Preview */}
-                <div className="h-[420px]">
+                <div className="h-420px">
                   <ChatPreview />
                 </div>
 
