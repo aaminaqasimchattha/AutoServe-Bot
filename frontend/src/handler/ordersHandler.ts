@@ -50,4 +50,25 @@ export async function uploadOrderHandler(request: Request) {
   }
 }
 
+import { eq } from 'drizzle-orm';
+export async function getOrderHandler(request: Request) {
+  const { searchParams } = new URL(request.url);
+  const order_id = searchParams.get('order_id');
+  if (!order_id) {
+    return NextResponse.json({ error: 'Missing order_id' }, { status: 400 });
+  }
+  
+  try {
+    const results = await db.select().from(orders).where(eq(orders.order_id, order_id)).limit(1);
+    if (results.length > 0) {
+      return NextResponse.json({ ok: true, order: results[0] });
+    } else {
+      return NextResponse.json({ ok: false, error: 'Order not found' }, { status: 404 });
+    }
+  } catch (err: any) {
+    console.error('Order fetch failed:', err?.message || err);
+    return NextResponse.json({ error: 'Fetch failed' }, { status: 500 });
+  }
+}
+
 export default uploadOrderHandler;

@@ -1,4 +1,5 @@
 import { pgTable, serial, text, varchar, integer, timestamp } from 'drizzle-orm/pg-core';
+import { customers } from './customers';
 
 export const orders = pgTable('orders', {
 	id: serial('id').primaryKey(),
@@ -11,3 +12,4 @@ export const orders = pgTable('orders', {
 });
 
 export type Orders = typeof orders;
+

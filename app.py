@@ -60,9 +60,13 @@ if str(ai_agent_path) not in sys.path:
 
 try:
     import importlib.util
+    # Remove cached version to force reload on server restart
+    if "chat_model_module" in sys.modules:
+        del sys.modules["chat_model_module"]
     spec = importlib.util.spec_from_file_location("chat_model_module", ai_agent_path / "chat_model.py")
     if spec and spec.loader:
         chat_model_module = importlib.util.module_from_spec(spec)
+        sys.modules["chat_model_module"] = chat_model_module  # Register so Python tracks it
         spec.loader.exec_module(chat_model_module)
         get_chat_response = chat_model_module.get_chat_response
         initialize_model  = chat_model_module.initialize_model
@@ -71,7 +75,7 @@ try:
 except Exception as e:
     logger.error(f"Model import failed: {e}")
 
-    def get_chat_response(_sender_number: str, _msg: str) -> str:
+    def get_chat_response(_sender_number: str, _msg: str, **kwargs) -> str:
         return "Model loading failed. Please try again later."
 
     def initialize_model() -> bool:
@@ -119,56 +123,80 @@ def _ensure_postgres_table(conn) -> None:
     conn.commit()
 
 
+def _save_transaction_direct(payload: dict) -> Optional[int]:
+    dsn = (os.getenv("DATABASE_URL") or os.getenv("DB_URI") or "").strip()
+    if not dsn or psycopg2 is None:
+        return None
+    try:
+        conn = psycopg2.connect(dsn)
+        _ensure_postgres_table(conn)
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO transaction_data (
+                transaction_id, sender_name, receiver_name, amount, date, time,
+                bank_or_service, status, raw_text, sender_number
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING id
+            """,
+            (
+                payload.get("transaction_id"),
+                payload.get("sender_name"),
+                payload.get("receiver_name"),
+                payload.get("amount"),
+                payload.get("date"),
+                payload.get("time"),
+                payload.get("bank_or_service"),
+                payload.get("status"),
+                payload.get("raw_text"),
+                payload.get("sender_number")
+            )
+        )
+        fetched = cur.fetchone()
+        inserted_id = fetched[0] if fetched else None
+        conn.commit()
+        conn.close()
+        return inserted_id
+    except Exception as e:
+        logger.warning(f"Direct Postgres transaction save failed: {e}")
+        return None
+
+
 def save_transaction_record(fields: dict, raw_text: str, sender_number: str) -> Optional[int]:
     payload = {
         "transaction_id": fields.get("transaction_id"),
-        "sender_name":    fields.get("sender_name"),
-        "receiver_name":  fields.get("receiver_name"),
-        "amount":         fields.get("amount"),
-        "date":           fields.get("date"),
-        "time":           fields.get("time"),
-        "bank_or_service":fields.get("bank_or_service"),
-        "status":         fields.get("status"),
-        "raw_text":       raw_text,
-        "sender_number":  sender_number,
+        "sender_name": fields.get("sender_name"),
+        "receiver_name": fields.get("receiver_name"),
+        "amount": fields.get("amount"),
+        "date": fields.get("date"),
+        "time": fields.get("time"),
+        "bank_or_service": fields.get("bank_or_service"),
+        "status": fields.get("status"),
+        "raw_text": raw_text,
+        "sender_number": sender_number,
     }
+    
+    inserted_id = None
     try:
         response = requests.post(
             f"{FRONTEND_API_URL.rstrip('/')}/api/save-transaction",
             json=payload, timeout=15, verify=certifi.where(),
         )
-        if not response.ok:
-            logger.warning(f"Frontend transaction save API failed: {response.status_code} {response.text}")
-            return None
-        response_data = response.json()
-        inserted_id   = response_data.get("id")
-        if inserted_id is None and isinstance(response_data.get("inserted"), list) and response_data["inserted"]:
-            first_row   = response_data["inserted"][0]
-            inserted_id = first_row.get("id") if isinstance(first_row, dict) else None
-        return int(inserted_id) if inserted_id is not None else None
+        if response.ok:
+            response_data = response.json()
+            inserted_id   = response_data.get("id")
+            if inserted_id is None and isinstance(response_data.get("inserted"), list) and response_data["inserted"]:
+                first_row   = response_data["inserted"][0]
+                inserted_id = first_row.get("id") if isinstance(first_row, dict) else None
+        else:
+            logger.warning(f"Frontend transaction API failed: {response.status_code} {response.text}")
     except Exception as error:
-        logger.warning(f"Failed to save transaction via frontend API: {error}")
-        return None
-
-
-def _ensure_upload_dir() -> None:
-    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-
-
-def _read_json_list(path: Path) -> list:
-    if not path.exists():
-        return []
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return []
-
-
-def _append_json_record(path: Path, record: dict) -> None:
-    _ensure_upload_dir()
-    existing = _read_json_list(path)
-    existing.append(record)
-    path.write_text(json.dumps(existing, indent=2, ensure_ascii=False), encoding="utf-8")
+        logger.warning(f"Failed to reach frontend API: {error}")
+        
+    if inserted_id is None:
+        inserted_id = _save_transaction_direct(payload)
+        
+    return int(inserted_id) if inserted_id is not None else None
 
 
 @app.post("/api/upload")
@@ -248,18 +276,29 @@ async def api_upload_urls(request: Request):
 def get_gmail_access_token() -> Optional[str]:
     global REFRESH_TOKEN
     if not CLIENT_ID or not CLIENT_SECRET or not REFRESH_TOKEN:
+        logger.warning(f"Gmail API missing credentials: ID={bool(CLIENT_ID)}, Secret={bool(CLIENT_SECRET)}, Token={bool(REFRESH_TOKEN)}")
         return None
     try:
         res = requests.post(
             "https://oauth2.googleapis.com/token",
-            data={"client_id": CLIENT_ID, "client_secret": CLIENT_SECRET,
-                  "refresh_token": REFRESH_TOKEN, "grant_type": "refresh_token"},
-            verify=certifi.where()
+            data={
+                "client_id": CLIENT_ID, 
+                "client_secret": CLIENT_SECRET,
+                "refresh_token": REFRESH_TOKEN, 
+                "grant_type": "refresh_token"
+            },
+            verify=certifi.where(),
+            timeout=10
         )
-        return res.json().get("access_token")
+        if res.status_code == 200:
+            return res.json().get("access_token")
+        else:
+            logger.error(f"Gmail Token Refresh Error {res.status_code}: {res.text}")
+            return None
     except Exception as e:
         logger.error(f"Failed to refresh access token: {e}")
         return None
+
 
 
 def send_email_via_gmail_api(to_email: str, subject: str, body: str) -> bool:
@@ -418,6 +457,7 @@ else:
 # ─── IMAGE / OCR HELPERS ──────────────────────────────────────────────────────
 
 def download_whatsapp_image(media_id: str) -> Image.Image:
+    """Download image — uses VERIFY_TOKEN which holds the Facebook API access token."""
     url_res = requests.get(
         f"https://graph.facebook.com/v18.0/{media_id}",
         headers={"Authorization": f"Bearer {VERIFY_TOKEN}"},
@@ -436,6 +476,7 @@ def download_whatsapp_image(media_id: str) -> Image.Image:
     if img_res.status_code != 200:
         raise Exception(f"Image download failed: {img_res.text}")
     return Image.open(BytesIO(img_res.content))
+
 
 
 def preprocess_and_ocr(img: Image.Image) -> str:
@@ -468,8 +509,11 @@ def extract_transaction_fields(text: str) -> dict[str, str | None]:
         "status":          None,
     }
 
+    # ID Regex: Catch common patterns including OCR errors like '1D#' or 'ID#'
+    # Look for patterns like 1D#49260509712 or ID#... or ID ...
     for pattern in [
-        r"(?:Transaction\s*ID|TXN|Ref\s*No|Reference|Trace\s*No|RRN)[:\s#]*([A-Z0-9\-]{6,30})",
+        r"(?:Transaction\s*ID|TXN|Ref\s*No|Reference|Trace\s*No|RRN|1D#|ID#)[:\s#]*([A-Z0-9\-]{6,30})",
+        r"\bID[:\s#]+([0-9]{8,25})\b",
         r"\b(TXN[A-Z0-9]{6,25})\b",
         r"\b([A-Z]{2,4}[0-9]{8,20})\b",
     ]:
@@ -478,28 +522,40 @@ def extract_transaction_fields(text: str) -> dict[str, str | None]:
             result["transaction_id"] = m.group(1).strip()
             break
 
+    # Sender Regex: Look for 'Sent by' followed by name, often ending before a phone number
     m = re.search(
-        r"(?:From|Sender|Paid\s*by|Account\s*Holder|Debit\s*Account\s*Title)[:\s]+([A-Za-z\s]{3,40})",
+        r"(?:From|Sender|Paid\s*by|Sent\s*by|Account\s*Holder|Debit\s*Account\s*Title)[:\s]+([A-Za-z\s]+?)(?:\r?\n|\s+\d{10,15}|\s*$)",
         text, re.IGNORECASE
     )
     if m:
         result["sender_name"] = m.group(1).strip()
 
+    # Receiver Regex: Look for 'Sent to' or 'Paid to'
     m = re.search(
-        r"(?:To|Receiver|Recipient|Beneficiary|Credit\s*Account\s*Title|Paid\s*to)[:\s]+([A-Za-z\s]{3,40})",
+        r"(?:To|Receiver|Recipient|Beneficiary|Credit\s*Account\s*Title|Paid\s*to|Sent\s*to)[:\s]+([A-Za-z\s]+?)(?:\r?\n|\s+\d{10,15}|\s*$)",
         text, re.IGNORECASE
     )
     if m:
         result["receiver_name"] = m.group(1).strip()
 
+    # Amount Regex
     m = re.search(r"(?:Rs\.?|PKR|Amount)[:\s]*([\d,]+(?:\.\d{1,2})?)", text, re.IGNORECASE)
     if m:
         result["amount"] = f"Rs. {m.group(1).strip()}"
 
-    m = re.search(r"(\d{1,2}[-/]\d{1,2}[-/]\d{2,4})", text)
-    if m:
-        result["date"] = m.group(1).strip()
+    # Date Regex: Handle month names (e.g., 01 May 2026) or numeric formats
+    date_patterns = [
+        r"(\d{1,2}\s+[A-Za-z]{3,10}\s+\d{2,4})",
+        r"(\d{1,2}[-/]\d{1,2}[-/]\d{2,4})",
+        r"([A-Za-z]{3,10}\s+\d{1,2},?\s+\d{2,4})"
+    ]
+    for dp in date_patterns:
+        m = re.search(dp, text, re.IGNORECASE)
+        if m:
+            result["date"] = m.group(1).strip()
+            break
 
+    # Time Regex
     m = re.search(r"(\d{1,2}:\d{2}(?::\d{2})?\s*(?:AM|PM)?)", text, re.IGNORECASE)
     if m:
         result["time"] = m.group(1).strip()
@@ -532,6 +588,8 @@ def extract_transaction_fields(text: str) -> dict[str, str | None]:
     return result
 
 
+
+
 def format_transaction_message(fields: dict) -> str:
     lines   = ["✅ *Transaction Details Extracted*\n"]
     mapping = {
@@ -556,6 +614,22 @@ def format_transaction_message(fields: dict) -> str:
 async def startup_event():
     logger.info("Starting WhatsApp bot...")
     initialize_model()
+
+    # ── Email configuration check ────────────────────────────────────────────
+    use_gmail_api = bool(CLIENT_ID and CLIENT_SECRET and REFRESH_TOKEN)
+    use_smtp      = bool(GMAIL_USER and GMAIL_APP_PASSWORD)
+    if use_gmail_api:
+        logger.info("✅ Email: Gmail OAuth2 API configured")
+    elif use_smtp:
+        logger.info("✅ Email: Gmail SMTP configured")
+    else:
+        logger.warning(
+            "⚠️ Email NOT configured. Set either:\n"
+            "  • GMAIL_USER + GMAIL_APP_PASSWORD  (for SMTP)\n"
+            "  • CLIENT_ID + CLIENT_SECRET + REFRESH_TOKEN  (for Gmail API)"
+        )
+
+    logger.info(f"Frontend API URL: {FRONTEND_API_URL}")
     logger.info("Startup complete")
 
 
@@ -721,10 +795,6 @@ def _send_human_agent_email(sender_number: str, user_text: str) -> bool:
         f"Contact Method:  WhatsApp\n"
         f"Request Time:    {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
         "─────────────────────────────────────────────────────\n"
-        "CUSTOMER MESSAGE:\n"
-        "─────────────────────────────────────────────────────\n"
-        f"{user_text}\n\n"
-        "─────────────────────────────────────────────────────\n"
         "ACTION REQUIRED:\n"
         "─────────────────────────────────────────────────────\n"
         "1. Review the customer's request above\n"
@@ -794,6 +864,16 @@ async def webhook(request: Request):
         if message_id:
             processed_message_ids.add(message_id)
 
+        # ── Always track the customer in DB ───────────────────────────────────
+        try:
+            requests.post(
+                f"{FRONTEND_API_URL.rstrip('/')}/api/customers",
+                json={"phone_number": sender_number},
+                timeout=5, verify=certifi.where(),
+            )
+        except Exception:
+            pass
+
         # ══════════════════════════════════════════════════════════════════════
         # TEXT MESSAGE
         # ══════════════════════════════════════════════════════════════════════
@@ -805,6 +885,72 @@ async def webhook(request: Request):
             state     = pending_choice.get(sender_number)
 
             logger.info(f"📌 State for {sender_number}: {state!r}")
+
+            # ── Fetch / Initialize Customer Profile ───────────────────────────
+            c_data = {}
+            try:
+                c_resp = requests.get(f"{FRONTEND_API_URL.rstrip('/')}/api/customers", params={"phone": sender_number}, timeout=5, verify=certifi.where())
+                if c_resp.ok:
+                    c_data = c_resp.json()
+            except Exception:
+                pass
+
+            customer = c_data.get("customer")
+            import re as regex
+            has_order_id = bool(regex.search(r"ORD-\d+", user_text.upper()))
+
+            # ── State: awaiting customer onboarding ───────────────────────────
+            if state == "awaiting_onboarding":
+                try:
+                    import google.generativeai as genai
+                    import os
+                    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or os.getenv("API_KEY")
+                    if api_key:
+                        genai.configure(api_key=api_key)
+                    m = genai.GenerativeModel("gemini-1.5-flash-latest")
+                    prompt = f"Extract Name, Email, and CNIC from this text. Return strictly valid JSON with keys 'name', 'email', 'cnic'. Text: {user_text}"
+                    
+                    extracted = {"name": None, "email": None, "cnic": None}
+                    try:
+                        resp = m.generate_content(prompt)
+                        import json
+                        extracted = json.loads(resp.text.replace('```json', '').replace('```', '').strip())
+                    except Exception as ai_err:
+                        logger.warning(f"AI Onboarding extraction failed (quota?): {ai_err}. Falling back to regex.")
+                        # Fallback: Simple comma-separated or space-separated extraction
+                        # Example: Ali, ali@gmail.com, 12345-1234567-1
+                        parts = [p.strip() for p in user_text.replace(',', ' ').split() if p.strip()]
+                        for p in parts:
+                            if '@' in p and '.' in p: extracted["email"] = p
+                            elif regex.match(r"\d{5}-\d{7}-\d", p): extracted["cnic"] = p
+                            elif not extracted["name"] and len(p) > 2: extracted["name"] = p
+                    
+                    payload = {"phone_number": sender_number}
+                    if extracted.get("name"): payload["name"] = extracted["name"]
+                    if extracted.get("email"): payload["email"] = extracted["email"]
+                    if extracted.get("cnic"): payload["cnic"] = extracted["cnic"]
+                    
+                    logger.info(f"📤 Sending onboarding payload: {payload}")
+                    c_post_resp = requests.post(f"{FRONTEND_API_URL.rstrip('/')}/api/customers", json=payload, timeout=5, verify=certifi.where())
+                    logger.info(f"📥 Onboarding POST response: {c_post_resp.status_code} - {c_post_resp.text}")
+                except Exception as e:
+                    logger.error(f"Onboarding logic error: {e}")
+                
+                pending_choice.pop(sender_number, None)
+                user_text = "hello"  # Force the greeting menu to trigger below!
+                txt_lower = "hello"
+                customer_name = extracted.get("name") if "extracted" in locals() and isinstance(extracted, dict) else "Valued Customer"
+                customer = {"name": customer_name} # Bypass the block below and provide context name
+            
+            # If no name is found and they are not midway through a critical flow or asking about an order
+            elif (not customer or not customer.get("name")) and not has_order_id:
+                if state not in ("awaiting_bank_paid", "awaiting_payment_method"):
+                    pending_choice[sender_number] = "awaiting_onboarding"
+                    send_whatsapp_message(
+                        sender_number,
+                        "Welcome to AutoServe! 👋\n\nTo give you the best experience, please reply with your:\n*Name, Email, and CNIC*\n\n_(Example: Ali, ali@gmail.com, 12345-1234567-1)_"
+                    )
+                    return {"status": "ok"}
 
             # ── State: awaiting PAID reply after bank transfer ────────────────
             if state == "awaiting_bank_paid":
@@ -830,10 +976,58 @@ async def webhook(request: Request):
                     )
                 return {"status": "ok"}
 
+            # ── State: awaiting payment method choice (1 = COD, 2 = Bank) ─────
+            # This catches text replies AFTER the payment menu is sent.
+            # Without this, typing "2" falls through to the AI and returns products.
+            if state == "awaiting_payment_method":
+                if txt_lower in ("1", "cash", "cod", "cash on delivery"):
+                    send_whatsapp_message(
+                        sender_number,
+                        "✅ Thank you for choosing *Cash on Delivery*. Your order will be processed shortly. 🎉"
+                    )
+                    try:
+                        requests.post(
+                            f"{FRONTEND_API_URL.rstrip('/')}/api/save-payment-method",
+                            json={"phone": sender_number, "payment_method": "Cash on Delivery"},
+                            timeout=8, verify=certifi.where()
+                        )
+                    except Exception:
+                        pass
+                    pending_choice.pop(sender_number, None)
+                    return {"status": "ok"}
+
+                elif txt_lower in ("2", "bank", "banking", "bank app", "transfer", "easypaisa", "jazzcash", "hbl"):
+                    acct = "0088765789758"
+                    send_whatsapp_message(
+                        sender_number,
+                        f"✅ Thank you for choosing *Banking App*.\n\n"
+                        f"Please transfer the payment to:\n\n"
+                        f"*Account: {acct}*\n\n"
+                        f"After payment, send a screenshot of the transaction for order confirmation. 📸"
+                    )
+                    pending_choice[sender_number] = "awaiting_bank_paid"
+                    try:
+                        requests.post(
+                            f"{FRONTEND_API_URL.rstrip('/')}/api/save-payment-method",
+                            json={"phone": sender_number, "payment_method": "Bank App",
+                                  "account_number": acct, "status": "initiated"},
+                            timeout=8, verify=certifi.where()
+                        )
+                    except Exception:
+                        pass
+                    return {"status": "ok"}
+
+                else:
+                    send_whatsapp_message(
+                        sender_number,
+                        "Please reply with:\n\n"
+                        "*1* — Cash on Delivery\n"
+                        "*2* — Pay through banking app"
+                    )
+                return {"status": "ok"}
+
             # ══════════════════════════════════════════════════════════════════
             # MAIN MENU SHORTCUTS
-            # Payment is now handled via interactive buttons (message_type ==
-            # 'interactive') — no text-based state machine needed here.
             # ══════════════════════════════════════════════════════════════════
 
             # ── Option 1 / Chatbot ────────────────────────────────────────────
@@ -866,8 +1060,8 @@ async def webhook(request: Request):
                 return {"status": "ok"}
 
             # ── State: awaiting initial menu choice ───────────────────────────
-            if state == "awaiting_choice":
-                if txt_lower == "2":
+            if state == "awaiting_choice" and not is_greeting(user_text):
+                if txt_lower == "2" or "human" in txt_lower:
                     # "2" in the main menu means human agent
                     ok = _send_human_agent_email(sender_number, user_text)
                     if ok:
@@ -879,28 +1073,134 @@ async def webhook(request: Request):
                             f"You can also reach us at:\n📧 {HUMAN_AGENT_EMAIL}\n\nWe'll be in touch soon!"
                         )
                     pending_choice.pop(sender_number, None)
+                    return {"status": "ok"}
+                elif txt_lower == "1" or "chatbot" in txt_lower or "ai" in txt_lower:
+                    name = customer.get("name") if customer else "there"
+                    send_whatsapp_message(sender_number, f"Hi {name}, I'm Zara, the AI Assistant. How can I help you?")
+                    pending_choice.pop(sender_number, None)
+                    return {"status": "ok"}
                 else:
                     send_whatsapp_message(
                         sender_number,
                         "Please reply with *1* for Chatbot or *2* for Human. You can also type *Chatbot* or *Human*."
                     )
-                return {"status": "ok"}
+                    return {"status": "ok"}
 
-            # ── Greeting ──────────────────────────────────────────────────────
-            if is_greeting(user_text):
+            # ── Bare menu input without active state ─────────────────────────
+            # If user sends "1", "2", "chatbot", "human" etc. without any active
+            # state, they are probably replying late to a menu. Show the menu again.
+            if not state and txt_lower in ("1", "2", "chatbot", "human", "ai", "ai assistant"):
+                name = customer.get("name") if customer else None
+                greeting_name = f" {name}" if name else ""
                 pending_choice[sender_number] = "awaiting_choice"
                 send_whatsapp_message(
                     sender_number,
-                    "Hi there! 👋 Would you like to talk to:\n\n"
+                    f"Hi{greeting_name}! 👋 Would you like to talk to:\n\n"
                     "1️⃣ *Chatbot* (AI Assistant)\n"
                     "2️⃣ *Human Agent*\n\n"
                     "Reply with *1* or *2*, or type *Chatbot* / *Human*."
                 )
-                logger.info(f"👋 Sent greeting menu to {sender_number}")
+                logger.info(f"👋 Stale menu input detected, re-sent greeting menu to {sender_number}")
+                return {"status": "ok"}
+
+            # ── Direct Order Status Lookup ────────────────────────────────────
+            # If user sends an Order ID, fetch status directly from DB
+            if has_order_id:
+                import re as _re
+                order_id_match = _re.search(r"(ORD-\d+)", user_text.upper())
+                if order_id_match:
+                    found_order_id = order_id_match.group(1)
+                    try:
+                        order_resp = requests.get(
+                            f"{FRONTEND_API_URL.rstrip('/')}/api/orders",
+                            params={"order_id": found_order_id},
+                            timeout=5, verify=certifi.where()
+                        )
+                        if order_resp.ok:
+                            order_data = order_resp.json()
+                            if order_data.get("ok") and order_data.get("order"):
+                                o = order_data["order"]
+                                status = o.get("status", "Unknown")
+                                product = o.get("product", "your item")
+                                
+                                # Build a friendly status message
+                                if status.lower() == "processing":
+                                    status_msg = "is currently being *prepared* for shipment 📦"
+                                elif status.lower() == "dispatched":
+                                    status_msg = "has been *dispatched* and is on its way to you 🚚"
+                                elif status.lower() == "delivered":
+                                    status_msg = "has been *delivered* ✅"
+                                else:
+                                    status_msg = f"is currently *{status}*"
+                                
+                                customer_name = customer.get("name", "") if customer else ""
+                                greeting = f"Hi {customer_name}! " if customer_name else ""
+                                
+                                reply = (
+                                    f"{greeting}Here's the update on your order:\n\n"
+                                    f"📋 *Order ID:* {found_order_id}\n"
+                                    f"🛍️ *Product:* {product}\n"
+                                    f"📌 *Status:* Your order {status_msg}\n\n"
+                                    f"Is there anything else I can help you with?"
+                                )
+                                send_whatsapp_message(sender_number, reply)
+                                logger.info(f"📦 Order status sent for {found_order_id}: {status}")
+                                return {"status": "ok"}
+                            else:
+                                send_whatsapp_message(
+                                    sender_number,
+                                    f"Sorry, I couldn't find an order with ID *{found_order_id}*. Please double-check and try again."
+                                )
+                                return {"status": "ok"}
+                        else:
+                            send_whatsapp_message(
+                                sender_number,
+                                f"Sorry, I couldn't find an order with ID *{found_order_id}*. Please double-check and try again."
+                            )
+                            return {"status": "ok"}
+                    except Exception as e:
+                        logger.error(f"Order lookup error: {e}")
+                        send_whatsapp_message(
+                            sender_number,
+                            "Sorry, I'm having trouble looking up your order right now. Please try again in a moment."
+                        )
+                        return {"status": "ok"}
+
+            # ── Greeting ──────────────────────────────────────────────────────
+            # If it's a greeting but NOT an order tracking request, show the menu
+            if is_greeting(user_text) and not has_order_id:
+                name = customer.get("name") if customer else None
+                greeting_name = f" {name}" if name else ""
+                
+                pending_choice[sender_number] = "awaiting_choice"
+                send_whatsapp_message(
+                    sender_number,
+                    f"Hi{greeting_name}! 👋 Would you like to talk to:\n\n"
+                    "1️⃣ *Chatbot* (AI Assistant)\n"
+                    "2️⃣ *Human Agent*\n\n"
+                    "Reply with *1* or *2*, or type *Chatbot* / *Human*."
+                )
+                logger.info(f"👋 Sent personalized greeting menu to {sender_number} (Name: {name})")
                 return {"status": "ok"}
 
             # ── Default: AI chat ──────────────────────────────────────────────
-            bot_reply = get_chat_response(sender_number, user_text)
+            context_text = ""
+            is_returning = c_data.get("is_returning") if c_data else False
+            orders = c_data.get("orders", []) if c_data else []
+            name = customer.get("name") if customer else None
+            
+            if name:
+                context_text += f"Customer Name: {name}. "
+                
+            if is_returning:
+                context_text += f"Status: Returning Customer. "
+                if orders:
+                    last_order = orders[0]
+                    context_text += f"Last Order: {last_order.get('product')} (ID: {last_order.get('order_id')}, Status: {last_order.get('status')}). "
+            else:
+                context_text += f"Status: New Customer. "
+
+            bot_reply = get_chat_response(sender_number, user_text, context_text=context_text)
             logger.info(f"🤖 Zara replies: {bot_reply!r}")
             send_whatsapp_message(sender_number, bot_reply)
 
@@ -910,6 +1210,9 @@ async def webhook(request: Request):
                 logger.info(f"🛒 Order detected: {order_id}")
                 _send_order_email(order_id, sender_number, user_text, bot_reply)
                 send_payment_buttons(sender_number)
+                # ✅ Set state so text reply "1" or "2" is caught before AI
+                pending_choice[sender_number] = "awaiting_payment_method"
+
 
         # ══════════════════════════════════════════════════════════════════════
         # INTERACTIVE MESSAGE — button replies (payment method selection)
@@ -958,18 +1261,18 @@ async def webhook(request: Request):
                 logger.warning(f"⚠️ Unknown button id: {btn_id!r}")
 
         # ══════════════════════════════════════════════════════════════════════
-        # IMAGE MESSAGE — transaction screenshot OCR + email notification
+        # IMAGE MESSAGE — ALWAYS run OCR, save transaction, notify email
+        # Works for both payment screenshots and standalone transaction images.
         # ══════════════════════════════════════════════════════════════════════
         elif message_type == "image":
             media_id = message.get("image", {}).get("id")
             if not media_id:
                 send_whatsapp_message(sender_number, "❌ Could not read image. Please try again.")
             else:
-                if pending_choice.get(sender_number) == "awaiting_bank_paid":
-                    send_whatsapp_message(
-                        sender_number,
-                        "✅ Screenshot received. Thank you for choosing Banking App. Your payment confirmation is being checked now."
-                    )
+                is_payment_confirmation = pending_choice.get(sender_number) == "awaiting_bank_paid"
+
+
+                if is_payment_confirmation:
                     try:
                         requests.post(
                             f"{FRONTEND_API_URL.rstrip('/')}/api/save-payment-method",
@@ -979,44 +1282,55 @@ async def webhook(request: Request):
                     except Exception:
                         pass
                     pending_choice.pop(sender_number, None)
-                else:
-                    send_whatsapp_message(sender_number, "⏳ Processing your transaction image...")
-                    try:
-                        img      = download_whatsapp_image(media_id)
-                        raw_text = preprocess_and_ocr(img)
-                        logger.info(f"📝 OCR text: {raw_text[:300]}")
 
-                        if not raw_text.strip():
-                            send_whatsapp_message(
-                                sender_number,
-                                "❌ Could not read text from image. Please send a clearer screenshot."
-                            )
-                        else:
-                            fields = extract_transaction_fields(raw_text)
-                            logger.info(f"✅ Fields extracted: {fields}")
+                # ── Always run OCR and save the transaction data ──────────────
+                try:
 
-                            try:
-                                row_id = save_transaction_record(fields, raw_text, sender_number)
-                                logger.info(f"✅ Saved transaction record id={row_id}")
-                                email_ok = send_transaction_summary_email(fields, raw_text, sender_number, row_id=row_id)
-                                if email_ok:
-                                    logger.info(f"✅ Transaction summary email sent for {fields.get('transaction_id') or row_id}")
-                                else:
-                                    logger.warning(f"⚠️ Transaction summary email not sent for {fields.get('transaction_id') or row_id}")
-                            except Exception as e:
-                                logger.warning(f"⚠️ Failed to save transaction record: {e}")
+                    img      = download_whatsapp_image(media_id)
+                    raw_text = preprocess_and_ocr(img)
+                    logger.info(f"📝 OCR text: {raw_text[:300]}")
 
-                            send_whatsapp_message(
-                                sender_number,
-                                f"✅ Your transaction screenshot was received.\n\nExtracted reference: {fields.get('transaction_id') or 'Not found'}"
-                            )
-                            send_whatsapp_message(sender_number, format_transaction_message(fields))
-                    except Exception as e:
-                        logger.error(f"❌ Image processing failed: {e}", exc_info=True)
+                    if not raw_text.strip() or raw_text.startswith("[Image received - OCR"):
                         send_whatsapp_message(
                             sender_number,
-                            "❌ Something went wrong processing your image. Please try again."
+                            "❌ Could not read text from the image. Please send a clearer screenshot."
                         )
+                    else:
+                        fields = extract_transaction_fields(raw_text)
+                        logger.info(f"✅ Fields extracted: {fields}")
+
+                        # ── Save to DB ────────────────────────────────────────
+                        row_id = None
+                        try:
+                            row_id = save_transaction_record(fields, raw_text, sender_number)
+                            logger.info(f"✅ Transaction saved — DB row id={row_id}")
+                        except Exception as e:
+                            logger.warning(f"⚠️ Failed to save transaction: {e}")
+
+                        # ── Customer activity is now tracked automatically in DB ──
+                        tx_ref = fields.get("transaction_id") or (f"TX-{row_id}" if row_id is not None else None)
+
+                        # ── Send email notification ───────────────────────────
+                        try:
+                            email_ok = send_transaction_summary_email(fields, raw_text, sender_number, row_id=row_id)
+                            if email_ok:
+                                logger.info(f"✅ Transaction email sent for {fields.get('transaction_id') or row_id}")
+                            else:
+                                logger.warning(f"⚠️ Transaction email not sent for {fields.get('transaction_id') or row_id}")
+                        except Exception as e:
+                            logger.warning(f"⚠️ Email notification failed: {e}")
+
+                        # ── Reply to user with extracted transaction card only ──
+                        send_whatsapp_message(sender_number, format_transaction_message(fields))
+
+
+                except Exception as e:
+                    logger.error(f"❌ Image processing failed: {e}", exc_info=True)
+                    send_whatsapp_message(
+                        sender_number,
+                        "❌ Something went wrong processing your image. Please try again."
+                    )
+
 
         # ══════════════════════════════════════════════════════════════════════
         else:

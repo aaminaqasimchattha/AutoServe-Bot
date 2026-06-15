@@ -17,8 +17,9 @@ with warnings.catch_warnings():
 
 try:
     from pinecone import Pinecone
-except ImportError:
+except Exception as e:
     Pinecone = None
+    print(f"Warning: Pinecone import failed: {e}")
 
 try:
     from sentence_transformers import SentenceTransformer
@@ -42,12 +43,23 @@ def _get_env_value(*names: str) -> str:
 
 
 GEMINI_API_KEY      = _get_env_value("GEMINI_API_KEY", "GOOGLE_API_KEY", "API_KEY")
-GEMINI_MODEL_NAME   = _get_env_value("GEMINI_MODEL", "GEMINI_MODEL_NAME") or "models/gemini-2.5-pro"
+GEMINI_MODEL_NAME   = _get_env_value("GEMINI_MODEL", "GEMINI_MODEL_NAME") or "models/gemini-2.5-flash"
 PINECONE_API_KEY    = (os.getenv("PINECONE_API_KEY") or os.getenv("PINECONE_KEY") or "").strip()
 PINECONE_INDEX_NAME = "autoserve"
 
 # ---------------------------------------------------------------------------
 orders_db = {}
+
+
+def _frontend_api_base() -> str:
+    return _get_env_value("FRONTEND_API_URL", "FRONTEND_URL") or "http://localhost:3000"
+
+
+def _frontend_get(path: str, params: dict[str, str] | None = None):
+    import requests
+
+    url = f"{_frontend_api_base().rstrip('/')}{path}"
+    return requests.get(url, params=params or {}, timeout=5)
 
 
 def place_order(product_name: str, quantity: int, customer_address: str) -> str:
@@ -62,8 +74,7 @@ def place_order(product_name: str, quantity: int, customer_address: str) -> str:
     # Try to persist order to frontend API if available
     try:
         import requests
-        frontend_api = _get_env_value("FRONTEND_API_URL", "FRONTEND_URL") or "http://localhost:3000"
-        url = f"{frontend_api.rstrip('/')}/api/orders"
+        url = f"{_frontend_api_base().rstrip('/')}/api/orders"
         payload = {
             "order_id": order_id,
             "product": product_name,
@@ -91,6 +102,18 @@ def track_order(order_id: str) -> str:
     if order_id in orders_db:
         o = orders_db[order_id]
         return f"STATUS: {o['status']} — {o['quantity']}x {o['product']} shipping to {o['address']}."
+    try:
+        resp = _frontend_get("/api/orders", {"order_id": order_id})
+        if resp.ok:
+            payload = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
+            order = payload.get("order") if isinstance(payload, dict) else None
+            if isinstance(order, dict):
+                return (
+                    f"STATUS: {order.get('status') or 'Unknown'} — "
+                    f"{order.get('quantity') or '1'}x {order.get('product') or 'Unknown'} shipping to {order.get('address') or 'Not shared'}."
+                )
+    except Exception as exc:
+        logger.warning("Backend order tracking failed for %s: %s", order_id, exc)
     return f"ERROR: Order {order_id} not found."
 
 
@@ -509,9 +532,25 @@ class GeminiChatModel:
             "continue", "keep going", "go on", "next batch", "load more",
         }
 
+    def _is_order_tracking_intent(self, text: str) -> bool:
+        """Detect if the user is asking about order status / tracking."""
+        txt = text.lower().strip()
+        order_intent_phrases = [
+            "order status", "my order", "track order", "order i placed",
+            "about the order", "about my order", "where is my order",
+            "what happened to my order", "check order", "order update",
+            "know about order", "know about the order", "status of my order",
+            "status of order", "order tracking", "track my order",
+            "check my order", "order i made", "previous order",
+        ]
+        return any(p in txt for p in order_intent_phrases)
+
     def _is_simple_product_query(self, text: str) -> bool:
         """Detect simple product searches that DON'T need Gemini (saves quota)."""
         txt = text.lower().strip()
+        # Exclude order tracking intent
+        if self._is_order_tracking_intent(txt):
+            return False
         # Exclude catalog requests (need pagination)
         if self._is_catalog_request(txt):
             return False
@@ -527,19 +566,19 @@ class GeminiChatModel:
         return any(p in txt for p in product_phrases)
 
     def _detect_order_type(self, text: str) -> str:
-        """Detect order request type: 'place', 'cancel', 'track', or empty string."""
+        """Detect order request type: 'place', or empty string. (Tracking and Cancellation are delegated to the AI native tools)."""
         txt = text.lower().strip()
         
-        track_phrases = ["track", "where is", "status of", "tracking", "order status"]
-        if any(p in txt for p in track_phrases):
-            return "track"
-        
-        cancel_phrases = ["cancel order", "cancel", "refund", "return"]
-        if any(p in txt for p in cancel_phrases):
-            return "cancel"
-        
-        place_phrases = ["place", "order", "buy", "purchase", "want to", "get me", "send me"]
-        if any(p in txt for p in place_phrases):
+        # If an order ID is present, it is definitely tracking or cancelling, delegate to AI
+        import re as regex
+        has_ord = bool(regex.search(r"ord-\d+", txt))
+        if has_ord:
+            return ""
+            
+        place_phrases = ["place", "buy", "purchase", "want to", "get me", "send me"]
+        # If it contains tracking or AI switching keywords, don't treat as 'place'
+        ignore_keywords = ["track", "status", "check", "where is", "happen", "talk to", "assistant", "chatbot", "human"]
+        if any(p in txt for p in place_phrases) and not any(tk in txt for tk in ignore_keywords):
             return "place"
         
         # Detect structured order input: "product, quantity, address" format
@@ -713,6 +752,26 @@ class GeminiChatModel:
 
     def _quota_fallback_response(self, user_input: str) -> str:
         """Graceful fallback when Gemini quota is exhausted."""
+        txt_lower = user_input.strip().lower()
+        greetings = ("hello", "hi", "hey", "salam", "assalam o alaikum", "good morning", "good evening")
+        if txt_lower in greetings:
+            return "Hi there! (System is currently very busy, so AI is temporarily unavailable, but I am still here to help with your orders!)"
+        
+        # Don't search products for order tracking requests
+        if self._is_order_tracking_intent(user_input):
+            return "Sure! Please share your *Order ID* (e.g. ORD-1234) and I'll check the status for you right away."
+        
+        # Don't search products for general conversational questions
+        general_starters = [
+            "what is", "who is", "where is", "when is", "why is", "how is",
+            "what are", "who are", "how do", "how does", "how can",
+            "tell me about", "explain", "define", "can you tell", "do you know",
+            "thank you", "thanks", "okay", "ok", "great", "good", "nice",
+            "bye", "goodbye", "see you", "take care",
+        ]
+        if any(p in txt_lower for p in general_starters):
+            return "I'm here to help! Our AI is currently very busy, but feel free to ask me about products or your order status. 😊"
+            
         search_reply = self._direct_product_response(user_input)
         return search_reply
 
@@ -817,12 +876,27 @@ class GeminiChatModel:
             return None
 
         system_instruction = """
-You are Zara, a helpful electronics shopping assistant.
+You are Zara, a helpful electronics shopping assistant for AutoServe.
 
-━━━ PRODUCT LISTING RULES ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+━━━ RETURNING CUSTOMER BEHAVIOR ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+When a CUSTOMER CONTEXT block is included in the prompt:
+1. Greet the returning customer WARMLY and by name if their name is known.
+2. Mention their most recent order (product name, order ID, status).
+3. If status is "Processing"  → tell them it is being prepared.
+   If status is "Dispatched"  → tell them it is on its way.
+   If status is "Delivered"   → congratulate them and ask how they like it.
+4. Proactively RECOMMEND a related or complementary product from the catalog.
+5. If the customer is NEW (no prior order) — introduce yourself and ask how you can help.
+
+━━━ ORDER STATUS LOOKUP ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+When the customer asks about an order (e.g. "I want to know about this order ORD-5821", "what happened to my order", "where is my package", "what is my order status"):
+1. If the ORDER ID is provided in their message (e.g. ORD-5821) → you MUST use the `track_order` tool.
+   This tool will fetch the order data from the order table in the database.
+2. If NO order ID is given → ask the customer to share their Order ID.
+3. Reply to the user about the status of their order according to the `status` column returned from the order table. If it says 'Processing', tell them it is being prepared. If 'Dispatched', it is on the way.
+
+━━━ PRODUCT LISTING RULES ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 When a PRODUCT DATABASE is included in the prompt:
-Whenever user say  1 itshould reply wittheme message  below
-Hi there, I'm Zara, the AI Assistant. How can I help you? 
 1. List EVERY single product — never skip, summarise, or say "and more".
 2. For each product show ALL of these fields as a numbered card:
    • Full product name
@@ -835,12 +909,20 @@ Hi there, I'm Zara, the AI Assistant. How can I help you?
 4. NEVER invent or guess any product details.
 
 ━━━ ORDERS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Collect product name, quantity, and delivery address before
-calling place_order. Use cancel_order / track_order as needed.
+Collect product name, quantity, and delivery address before calling place_order.
+Use cancel_order / track_order as needed.
+
+━━━ RECOMMENDATIONS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+After helping a customer, always suggest 1–2 related products they might like
+based on what they previously ordered or what they are asking about.
 
 ━━━ GENERAL ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Be warm and concise outside of product listings.
-If no products are found, say so and ask the customer to rephrase.
+1. Be warm, friendly and concise.
+2. For "out of the box" or off-topic questions (unrelated to shopping or electronics):
+   - Answer the question politely using your general knowledge.
+   - Maintain your persona as Zara from AutoServe.
+   - Example: "That's an interesting question! While I'm usually busy helping with electronics here at AutoServe, I can tell you that [Answer]. Is there anything else you'd like to know, or perhaps a gadget I can help you find?"
+3. If no products are found for a search, say so politely and ask the customer to rephrase.
 """.strip()
 
         ModelClass = getattr(genai, "GenerativeModel", None) or getattr(genai, "ChatModel", None)
@@ -867,54 +949,118 @@ If no products are found, say so and ask the customer to rephrase.
         return self.sessions[sender]
 
     # ── 9. Main generate ─────────────────────────────────────────────────────
-    def generate(self, sender: str, user_input: str) -> str:
-
-        # ── Catalog / show-all request ────────────────────────────────────────
-        if self._is_catalog_request(user_input):
-            # Load ALL products from Pinecone the first time (lazy + cached)
-            self._ensure_products_loaded()
-            return self._build_catalog_page(sender, reset=True)
-
-        if self._is_more_catalog_request(sender, user_input):
-            return self._build_catalog_page(sender, reset=False)
-
-        # ── ORDER HANDLING (place/cancel/track) ────────────────────────────────
-        order_type = self._detect_order_type(user_input)
-        if order_type:
-            return self._handle_order_request(sender, order_type, user_input)
-
-        # ── QUOTA SAVER: Simple product queries (Pinecone only, no Gemini) ────
-        if self._is_simple_product_query(user_input):
-            return self._direct_product_response(user_input)
-
-        # ── Model readiness check ─────────────────────────────────────────────
-        if not self.ready:
-            load_dotenv(PROJECT_ROOT / ".env", override=True)
-            load_dotenv(override=True)
-            global GEMINI_API_KEY
-            GEMINI_API_KEY = _get_env_value("GEMINI_API_KEY", "GOOGLE_API_KEY", "API_KEY")
-            self._initialize()
-
-        if not self.ready:
-            return f"Model not ready: {self.error}"
-        if genai is None:
-            return "Gemini API not available."
+    def generate(self, sender: str, user_input: str, context_text: str = "") -> str:
 
         try:
-            # ── Specific product search (semantic via Pinecone) ───────────────
-            products = self._search_products(user_input, limit=20)
-            context  = self._format_context(products)
+            # ── ORDER TRACKING INTENT (highest priority) ──────────────────────────
+            # If user asks about order status, skip ALL product logic and go to AI
+            if self._is_order_tracking_intent(user_input):
+                import re as regex
+                has_ord = bool(regex.search(r"ORD-\d+", user_input.upper()))
+                if has_ord:
+                    # Has order ID — let AI handle with track_order tool
+                    pass  # Fall through to AI section below
+                else:
+                    # No order ID — ask for it immediately
+                    return "Sure! Please share your *Order ID* (e.g. ORD-1234) and I'll check the status for you right away. 📦"
 
-            if context:
+            # ── Catalog / show-all request ────────────────────────────────────────
+            if not self._is_order_tracking_intent(user_input):
+                if self._is_catalog_request(user_input):
+                    # Load ALL products from Pinecone the first time (lazy + cached)
+                    self._ensure_products_loaded()
+                    return self._build_catalog_page(sender, reset=True)
+
+                if self._is_more_catalog_request(sender, user_input):
+                    return self._build_catalog_page(sender, reset=False)
+
+            # ── ORDER HANDLING (place/cancel/track) ────────────────────────────────
+            order_type = self._detect_order_type(user_input)
+            if order_type:
+                return self._handle_order_request(sender, order_type, user_input)
+
+            # ── QUOTA SAVER: Simple product queries (Pinecone only, no Gemini) ────
+            if self._is_simple_product_query(user_input):
+                return self._direct_product_response(user_input)
+
+            # ── Model readiness check ─────────────────────────────────────────────
+            if not self.ready:
+                load_dotenv(PROJECT_ROOT / ".env", override=True)
+                load_dotenv(override=True)
+                global GEMINI_API_KEY
+                GEMINI_API_KEY = _get_env_value("GEMINI_API_KEY", "GOOGLE_API_KEY", "API_KEY")
+                self._initialize()
+
+            if not self.ready:
+                return f"Model not ready: {self.error}"
+            if genai is None:
+                return "Gemini API not available."
+
+            # ── Specific product search (semantic via Pinecone) ───────────────
+            txt_lower = user_input.strip().lower()
+            greetings = ("hello", "hi", "hey", "salam", "assalam o alaikum", "good morning", "good evening")
+            
+            # Detect if user is asking about order tracking / status
+            order_intent_phrases = [
+                "order status", "my order", "track order", "order i placed",
+                "about the order", "about my order", "where is my order",
+                "what happened to my order", "check order", "order update",
+                "know about order", "know about the order", "status of my order",
+                "status of order", "order tracking", "track my order"
+            ]
+            is_order_intent = any(p in txt_lower for p in order_intent_phrases)
+            
+            # Detect general/conversational questions that are NOT about products
+            general_question_starters = [
+                "what is", "who is", "where is", "when is", "why is", "how is",
+                "what are", "who are", "where are", "when are", "why are", "how are",
+                "what was", "who was", "how do", "how does", "how can", "how much is",
+                "tell me about", "explain", "define", "meaning of",
+                "can you tell", "do you know", "what do you think",
+                "thank you", "thanks", "okay", "ok", "great", "good", "nice",
+                "bye", "goodbye", "see you", "take care",
+            ]
+            is_general_question = any(txt_lower.startswith(p) or p in txt_lower for p in general_question_starters)
+            # Don't mark as general if it's clearly about products
+            product_signals = ["show me", "find", "search", "looking for", "price", "buy", "purchase", "product"]
+            if any(ps in txt_lower for ps in product_signals):
+                is_general_question = False
+            
+            products = []
+            if txt_lower not in greetings and not is_order_intent and not is_general_question:
+                products = self._search_products(user_input, limit=20)
+                
+            context = self._format_context(products)
+
+            if is_order_intent:
+                # Pure order tracking: skip products entirely, let AI use track_order tool
+                prompt = (
+                    f"Customer Context:\n{context_text}\n\n"
+                    f"Customer question: {user_input}\n\n"
+                    "The customer is asking about an order. If they provided an Order ID (like ORD-1234), "
+                    "use the track_order tool to fetch the status. If they did NOT provide an Order ID, "
+                    "politely ask them to share it so you can look it up."
+                )
+            elif is_general_question:
+                # General conversation: let AI answer naturally without product context
+                prompt = (
+                    f"Customer Context:\n{context_text}\n\n"
+                    f"Customer question: {user_input}\n\n"
+                    "Answer this question naturally and helpfully using your general knowledge. "
+                    "Stay in character as Zara from AutoServe. Be friendly and concise. "
+                    "After answering, you may gently ask if they need help with any electronics or orders."
+                )
+            elif context:
                 prompt = (
                     f"{context}\n\n"
+                    f"Customer Context:\n{context_text}\n\n"
                     f"Customer question: {user_input}\n\n"
-                    "List ALL products above as numbered cards. Each card must include: "
+                    "List ALL products above as numbered cards only when the question is about products. Each card must include: "
                     "name, price (discounted + MRP + savings, or 'Price not listed'), "
                     "category, rating with review count, and the full purchase link."
                 )
             else:
-                prompt = user_input
+                prompt = f"Customer Context:\n{context_text}\n\nCustomer question: {user_input}" if context_text else user_input
 
             session = self._get_or_create_session(sender)
             if session is None:
@@ -978,6 +1124,8 @@ If no products are found, say so and ask the customer to rephrase.
             if _is_quota_error_text(err):
                 return self._quota_fallback_response(user_input)
             return "Something went wrong. Please try again."
+        finally:
+            CURRENT_SENDER_NUMBER = ""
 
 
 # ---------------------------------------------------------------------------
@@ -992,8 +1140,8 @@ def initialize_model() -> bool:
     return False
 
 
-def get_chat_response(sender_number: str, msg: str) -> str:
-    return chat_model.generate(sender_number, msg)
+def get_chat_response(sender_number: str, msg: str, context_text: str = "") -> str:
+    return chat_model.generate(sender_number, msg, context_text=context_text)
 
 
 if __name__ == "__main__":

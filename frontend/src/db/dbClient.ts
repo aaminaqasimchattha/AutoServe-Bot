@@ -16,7 +16,7 @@ for (const envPath of envCandidates) {
 const loadedEnvFiles = envCandidates.filter((envPath) => fs.existsSync(envPath));
 const dbUri = process.env.DB_URI || process.env.DATABASE_URL;
 
-logger.info?.(
+console.info(
   `Frontend DB env check: loaded=${dbUri ? "yes" : "no"}, files=${loadedEnvFiles.length ? loadedEnvFiles.join(", ") : "none"}`
 );
 
