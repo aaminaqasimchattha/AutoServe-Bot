@@ -100,6 +100,24 @@ URL_INDEX_FILE    = UPLOAD_DIR / "url_index.json"
 FRONTEND_API_URL  = os.getenv("FRONTEND_API_URL") or os.getenv("FRONTEND_URL") or "http://localhost:3000"
 
 
+def _ensure_upload_dir() -> None:
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _append_json_record(file_path: Path, record: dict) -> None:
+    _ensure_upload_dir()
+    records = []
+    if file_path.exists():
+        try:
+            records = json.loads(file_path.read_text(encoding="utf-8"))
+            if not isinstance(records, list):
+                records = []
+        except Exception:
+            records = []
+    records.append(record)
+    file_path.write_text(json.dumps(records, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
 def _ensure_postgres_table(conn) -> None:
     cur = conn.cursor()
     cur.execute(
@@ -906,15 +924,24 @@ async def webhook(request: Request):
                     import os
                     api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or os.getenv("API_KEY")
                     if api_key:
-                        genai.configure(api_key=api_key)
-                    m = genai.GenerativeModel("gemini-1.5-flash-latest")
+                        configure = getattr(genai, "configure", None)
+                        if callable(configure):
+                            configure(api_key=api_key)
+                    GenerativeModel = getattr(genai, "GenerativeModel", None)
+                    if not callable(GenerativeModel):
+                        raise AttributeError("GenerativeModel is not available in google.generativeai")
+                    m = GenerativeModel("gemini-1.5-flash-latest")
                     prompt = f"Extract Name, Email, and CNIC from this text. Return strictly valid JSON with keys 'name', 'email', 'cnic'. Text: {user_text}"
                     
                     extracted = {"name": None, "email": None, "cnic": None}
                     try:
-                        resp = m.generate_content(prompt)
+                        generate_content = getattr(m, "generate_content", None)
+                        if not callable(generate_content):
+                            raise AttributeError("generate_content is not available on GenerativeModel")
+                        resp = generate_content(prompt)
                         import json
-                        extracted = json.loads(resp.text.replace('```json', '').replace('```', '').strip())
+                        resp_text = getattr(resp, "text", "")
+                        extracted = json.loads(resp_text.replace('```json', '').replace('```', '').strip())
                     except Exception as ai_err:
                         logger.warning(f"AI Onboarding extraction failed (quota?): {ai_err}. Falling back to regex.")
                         # Fallback: Simple comma-separated or space-separated extraction
@@ -939,7 +966,7 @@ async def webhook(request: Request):
                 pending_choice.pop(sender_number, None)
                 user_text = "hello"  # Force the greeting menu to trigger below!
                 txt_lower = "hello"
-                customer_name = extracted.get("name") if "extracted" in locals() and isinstance(extracted, dict) else "Valued Customer"
+                customer_name = locals().get("extracted", {}).get("name") if isinstance(locals().get("extracted"), dict) else "Valued Customer"
                 customer = {"name": customer_name} # Bypass the block below and provide context name
             
             # If no name is found and they are not midway through a critical flow or asking about an order
