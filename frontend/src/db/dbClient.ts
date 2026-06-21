@@ -3,6 +3,7 @@ import { Pool } from "pg";
 import { config } from "dotenv";
 import path from "node:path";
 import fs from "node:fs";
+import { sql } from "drizzle-orm";
 
 const envCandidates = [
   path.resolve(__dirname, "../../.env"),
@@ -25,6 +26,7 @@ const globalForDb = global as unknown as {
   pool?: Pool;
   db?: ReturnType<typeof drizzle>;
   hasPinged?: boolean;
+  hasEnsuredSchema?: boolean;
 };
 
 // 🧩 Create pool only once
@@ -64,5 +66,46 @@ async function pingDatabaseOnce() {
 }
 
 pingDatabaseOnce();
+
+async function ensureTransactionSchemaOnce() {
+  if (globalForDb.hasEnsuredSchema) return;
+
+  try {
+    await globalForDb.db!.execute(sql`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1
+          FROM information_schema.columns
+          WHERE table_name = 'transaction_data'
+            AND column_name = 'created_at'
+        ) THEN
+          ALTER TABLE transaction_data ADD COLUMN created_at timestamptz;
+        END IF;
+
+        IF EXISTS (
+          SELECT 1
+          FROM information_schema.columns
+          WHERE table_name = 'transaction_data'
+            AND column_name = 'saved_at'
+        ) THEN
+          EXECUTE 'UPDATE transaction_data SET created_at = COALESCE(created_at, saved_at, now()) WHERE created_at IS NULL';
+        ELSE
+          EXECUTE 'UPDATE transaction_data SET created_at = COALESCE(created_at, now()) WHERE created_at IS NULL';
+        END IF;
+
+        ALTER TABLE transaction_data ALTER COLUMN created_at SET DEFAULT now();
+        ALTER TABLE transaction_data ALTER COLUMN created_at SET NOT NULL;
+      EXCEPTION
+        WHEN duplicate_column THEN NULL;
+      END $$;
+    `);
+    globalForDb.hasEnsuredSchema = true;
+  } catch (error: any) {
+    console.warn(`Transaction schema sync failed: ${error.message}`);
+  }
+}
+
+ensureTransactionSchemaOnce();
 
 export const db = globalForDb.db!;

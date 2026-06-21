@@ -403,9 +403,13 @@ export default function AnalyticsPage() {
     try {
       const res  = await fetch('/api/dashboard/analytics');
       const json = await res.json();
+      if (!res.ok || json?.ok === false) {
+        throw new Error(json?.error || 'Failed to fetch analytics data');
+      }
       setData(json);
-    } catch {
-      setError('Could not load analytics data. Check your database connection.');
+    } catch (err) {
+      setData(null);
+      setError(err instanceof Error ? err.message : 'Could not load analytics data. Check your database connection.');
     } finally {
       setLoading(false);
     }

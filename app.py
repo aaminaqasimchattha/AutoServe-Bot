@@ -134,8 +134,44 @@ def _ensure_postgres_table(conn) -> None:
             status text,
             raw_text text,
             sender_number text,
+            created_at timestamptz DEFAULT now(),
             saved_at timestamptz DEFAULT now()
         )
+        """
+    )
+    cur.execute(
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1
+                FROM information_schema.columns
+                WHERE table_name = 'transaction_data'
+                  AND column_name = 'created_at'
+            ) THEN
+                ALTER TABLE transaction_data ADD COLUMN created_at timestamptz;
+            END IF;
+
+            IF EXISTS (
+                SELECT 1
+                FROM information_schema.columns
+                WHERE table_name = 'transaction_data'
+                  AND column_name = 'saved_at'
+            ) THEN
+                UPDATE transaction_data
+                SET created_at = COALESCE(created_at, saved_at, now())
+                WHERE created_at IS NULL;
+            ELSE
+                UPDATE transaction_data
+                SET created_at = COALESCE(created_at, now())
+                WHERE created_at IS NULL;
+            END IF;
+
+            ALTER TABLE transaction_data ALTER COLUMN created_at SET DEFAULT now();
+            ALTER TABLE transaction_data ALTER COLUMN created_at SET NOT NULL;
+        EXCEPTION
+            WHEN duplicate_column THEN NULL;
+        END $$;
         """
     )
     conn.commit()
@@ -472,13 +508,23 @@ else:
     logger.info(f"   APP_SECRET loaded: {'✓' if APP_SECRET else '✗ NOT SET'}")
 
 
+def get_whatsapp_access_token() -> Optional[str]:
+    if ACCESS_TOKEN:
+        return ACCESS_TOKEN
+    logger.error("❌ WhatsApp ACCESS_TOKEN is missing. Replies to WhatsApp messages cannot be sent.")
+    return None
+
+
 # ─── IMAGE / OCR HELPERS ──────────────────────────────────────────────────────
 
 def download_whatsapp_image(media_id: str) -> Image.Image:
-    """Download image — uses VERIFY_TOKEN which holds the Facebook API access token."""
+    """Download image from WhatsApp media API."""
+    access_token = get_whatsapp_access_token()
+    if not access_token:
+        raise Exception("Missing WhatsApp access token")
     url_res = requests.get(
         f"https://graph.facebook.com/v18.0/{media_id}",
-        headers={"Authorization": f"Bearer {VERIFY_TOKEN}"},
+        headers={"Authorization": f"Bearer {access_token}"},
         verify=certifi.where()
     )
     if url_res.status_code != 200:
@@ -488,7 +534,7 @@ def download_whatsapp_image(media_id: str) -> Image.Image:
         raise Exception("No media URL in response")
     img_res = requests.get(
         media_url,
-        headers={"Authorization": f"Bearer {VERIFY_TOKEN}"},
+        headers={"Authorization": f"Bearer {access_token}"},
         verify=certifi.where()
     )
     if img_res.status_code != 200:
@@ -1380,6 +1426,9 @@ async def webhook(request: Request):
 # ─── SEND WHATSAPP MESSAGE ────────────────────────────────────────────────────
 
 def send_whatsapp_message(to: str, text: str):
+    access_token = get_whatsapp_access_token()
+    if not access_token:
+        return {"error": "Missing WhatsApp access token"}
     url     = f"https://graph.facebook.com/v25.0/{PHONE_ID}/messages"
     headers = {
         "Authorization": f"Bearer {VERIFY_TOKEN}",

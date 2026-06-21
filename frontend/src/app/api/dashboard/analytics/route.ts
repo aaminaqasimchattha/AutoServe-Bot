@@ -11,15 +11,16 @@ export async function GET() {
       db.execute(sql`SELECT COUNT(*) as total FROM transaction_data`),
     ]);
 
-    // 2. Total revenue from successful transactions (extract numeric from "Rs. 1,500" etc.)
+    // 2. Total revenue from successful transactions.
+    // Use regexp_match so formatted values like "Rs. 1,500" and "PKR 2500.50" can still be summed safely.
     const revenueRes = await db.execute(sql`
       SELECT COALESCE(SUM(
-        CAST(REGEXP_REPLACE(REPLACE(amount, ',', ''), '[^0-9.]', '', 'g') AS NUMERIC)
+        COALESCE((regexp_match(REPLACE(amount, ',', ''), '([0-9]+(?:\.[0-9]+)?)'))[1], '0')::numeric
       ), 0) as total
       FROM transaction_data
       WHERE status ILIKE '%success%'
         AND amount IS NOT NULL
-        AND REGEXP_REPLACE(REPLACE(amount, ',', ''), '[^0-9.]', '', 'g') != ''
+        AND amount ~ '[0-9]'
     `);
 
     // 3. Last 7 days transaction volume (group by date)
