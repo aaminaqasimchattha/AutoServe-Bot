@@ -965,6 +965,7 @@ async def webhook(request: Request):
 
             # ── State: awaiting customer onboarding ───────────────────────────
             if state == "awaiting_onboarding":
+                extracted = {"name": None, "email": None, "cnic": None}
                 try:
                     import google.generativeai as genai
                     import os
@@ -977,9 +978,18 @@ async def webhook(request: Request):
                     if not callable(GenerativeModel):
                         raise AttributeError("GenerativeModel is not available in google.generativeai")
                     m = GenerativeModel("gemini-1.5-flash-latest")
-                    prompt = f"Extract Name, Email, and CNIC from this text. Return strictly valid JSON with keys 'name', 'email', 'cnic'. Text: {user_text}"
+                    prompt = (
+                        "Extract a person's Name, Email, and CNIC from the following text. "
+                        "Return strictly valid JSON with keys 'name', 'email', 'cnic'. "
+                        "Rules: If the text is just a greeting (hi, hello, hey, etc.) with no real name, set name to null. "
+                        "Only extract an actual person's name (e.g. Muhammad Ali, Sara Khan). "
+                        f"Text: {user_text}"
+                    )
                     
-                    extracted = {"name": None, "email": None, "cnic": None}
+                    # Common words that are NOT real names
+                    _JUNK_NAMES = {"hello", "hi", "hey", "hiya", "greetings", "yes", "no", "ok", "okay", "sure",
+                                   "thanks", "thank", "you", "please", "help", "start", "begin", "test"}
+                    
                     try:
                         generate_content = getattr(m, "generate_content", None)
                         if not callable(generate_content):
@@ -988,36 +998,55 @@ async def webhook(request: Request):
                         import json
                         resp_text = getattr(resp, "text", "")
                         extracted = json.loads(resp_text.replace('```json', '').replace('```', '').strip())
+                        # Reject junk names returned by AI
+                        if extracted.get("name") and extracted["name"].strip().lower() in _JUNK_NAMES:
+                            extracted["name"] = None
                     except Exception as ai_err:
                         logger.warning(f"AI Onboarding extraction failed (quota?): {ai_err}. Falling back to regex.")
-                        # Fallback: Simple comma-separated or space-separated extraction
-                        # Example: Ali, ali@gmail.com, 12345-1234567-1
-                        parts = [p.strip() for p in user_text.replace(',', ' ').split() if p.strip()]
+                        # Fallback: comma-separated parsing
+                        # Expected format: "Ali Khan, ali@gmail.com, 12345-1234567-1"
+                        parts = [p.strip() for p in user_text.split(',') if p.strip()]
+                        name_parts = []
                         for p in parts:
-                            if '@' in p and '.' in p: extracted["email"] = p
-                            elif regex.match(r"\d{5}-\d{7}-\d", p): extracted["cnic"] = p
-                            elif not extracted["name"] and len(p) > 2: extracted["name"] = p
+                            if '@' in p and '.' in p:
+                                extracted["email"] = p
+                            elif regex.match(r"\d{5}-\d{7}-\d", p):
+                                extracted["cnic"] = p
+                            elif p.lower() not in _JUNK_NAMES:
+                                name_parts.append(p)
+                        if name_parts:
+                            extracted["name"] = " ".join(name_parts).strip()
                     
-                    payload = {"phone_number": sender_number}
-                    if extracted.get("name"): payload["name"] = extracted["name"]
-                    if extracted.get("email"): payload["email"] = extracted["email"]
-                    if extracted.get("cnic"): payload["cnic"] = extracted["cnic"]
-                    
-                    logger.info(f"📤 Sending onboarding payload: {payload}")
-                    c_post_resp = requests.post(f"{FRONTEND_API_URL.rstrip('/')}/api/customers", json=payload, timeout=5, verify=certifi.where())
-                    logger.info(f"📥 Onboarding POST response: {c_post_resp.status_code} - {c_post_resp.text}")
+                    # Only save if we actually got useful data
+                    has_useful_data = any([extracted.get("name"), extracted.get("email"), extracted.get("cnic")])
+                    if has_useful_data:
+                        payload = {"phone_number": sender_number}
+                        if extracted.get("name"): payload["name"] = extracted["name"]
+                        if extracted.get("email"): payload["email"] = extracted["email"]
+                        if extracted.get("cnic"): payload["cnic"] = extracted["cnic"]
+                        logger.info(f"📤 Sending onboarding payload: {payload}")
+                        c_post_resp = requests.post(f"{FRONTEND_API_URL.rstrip('/')}/api/customers", json=payload, timeout=5, verify=certifi.where())
+                        logger.info(f"📥 Onboarding POST response: {c_post_resp.status_code} - {c_post_resp.text}")
+                    else:
+                        logger.warning(f"⚠️ No useful onboarding data extracted from: {user_text!r}. Re-asking.")
+                        pending_choice[sender_number] = "awaiting_onboarding"
+                        send_whatsapp_message(
+                            sender_number,
+                            "I couldn't find your details. Please reply with your:\n*Name, Email, and CNIC*\n\n_(Example: Ali Khan, ali@gmail.com, 12345-1234567-1)_"
+                        )
+                        return {"status": "ok"}
                 except Exception as e:
                     logger.error(f"Onboarding logic error: {e}")
                 
                 pending_choice.pop(sender_number, None)
                 user_text = "hello"  # Force the greeting menu to trigger below!
                 txt_lower = "hello"
-                customer_name = locals().get("extracted", {}).get("name") if isinstance(locals().get("extracted"), dict) else "Valued Customer"
+                customer_name = extracted.get("name") if extracted.get("name") else "Valued Customer"
                 customer = {"name": customer_name} # Bypass the block below and provide context name
             
             # If no name is found and they are not midway through a critical flow or asking about an order
             elif (not customer or not customer.get("name")) and not has_order_id:
-                if state not in ("awaiting_bank_paid", "awaiting_payment_method"):
+                if state not in ("awaiting_bank_paid", "awaiting_payment_method", "awaiting_onboarding"):
                     pending_choice[sender_number] = "awaiting_onboarding"
                     send_whatsapp_message(
                         sender_number,
